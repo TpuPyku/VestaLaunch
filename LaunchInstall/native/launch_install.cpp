@@ -1,5 +1,6 @@
 ﻿// LaunchInstall - one-file installer of VestaLaunch for the Lada Vesta MMC (Windows CE 6.0, ARM, 800x480),
-// with the G3NavHMI patch and automatic rollback. Also builds as a desktop app for testing.
+// with the G3NavHMI patch, the "Navigation" button caption and tile patches and automatic rollback. Also
+// builds as a desktop app for testing.
 //
 // What "Install" does (each step is written to a journal first and verified after):
 //   1. unpacks the embedded VestaLaunch (exe + Skin) into \SDMMC\VestaLaunch.new and compares every
@@ -11,8 +12,13 @@
 //      after the write, compared with the backup: exactly that byte may differ;
 //   3. Config\ExternNavi.cfg: \SDMMC\VestaLaunch\VestaLaunch.exe as the first line (backup, written
 //      through a temporary file, read back);
-//   4. swaps VestaLaunch.new in (an older VestaLaunch is kept as VestaLaunch.old until the end);
-//   5. if the shell had to be closed for step 2: starts it again and watches it for 30 s.
+//   4. language_cn.qm: the "Navigation" button caption "Навигация" -> "Программы" in place (the entry
+//      whose source is "NAVI"; both captions are 9 letters, so the file keeps its size). Only if that
+//      one entry is there; a file already saying "Программы" is left alone;
+//   5. the "Navigation" button tile main_symbol_navigation.png -> ours (an app grid), only when the file
+//      is byte for byte the factory one (another skin's tile is left alone);
+//   6. swaps VestaLaunch.new in (an older VestaLaunch is kept as VestaLaunch.old until the end);
+//   7. if the shell had to be closed for step 2: starts it again and watches it for 30 s.
 // Any failed step, a failed check or a shell that dies in those 30 s rolls everything back in reverse order
 // from the journal and starts the original shell. A journal left by an interrupted run (power off) is
 // rolled back by the next "Install" or "Uninstall".
@@ -28,14 +34,24 @@
 #include <stdarg.h>
 #include <tlhelp32.h>
 
-#define APP_CLASS   L"LaunchInstall_Wnd"
-#define IDR_PAYLOAD 101
+#define APP_CLASS       L"LaunchInstall_Wnd"
+#define IDR_PAYLOAD     101
+#define IDR_ICONFACTORY 102
+#define IDR_ICONVESTA   103
 
 static const char*    kLoopOld  = "127.0.0.1";
 static const char*    kLoopNew  = "127.0.0.2";
 static const wchar_t* kShell    = L"G3NavHMI.exe";
 static const wchar_t* kLauncher = L"VestaLaunch.exe";
 static const char*    kCfgLine  = "\\SDMMC\\VestaLaunch\\VestaLaunch.exe";   // what ExternNavi.cfg points to
+// The shell's "Navigation" button caption in language\language_cn.qm: the entry whose source is "NAVI" and
+// whose translation is "Навигация" (the only "Навигация" followed by that source — three others sit inside
+// longer sentences). We put "Программы" there: also 9 letters, so the file keeps its size and the shell's
+// lookup stays valid. .qm strings are UTF-16, big-endian, without a terminator.
+enum { kCapLen = 18, kTailLen = 14 };
+static const unsigned char kNavCap[kCapLen] = { 0x04,0x1D,0x04,0x30,0x04,0x32,0x04,0x38,0x04,0x33,0x04,0x30,0x04,0x46,0x04,0x38,0x04,0x4F };
+static const unsigned char kPrgCap[kCapLen] = { 0x04,0x1F,0x04,0x40,0x04,0x3E,0x04,0x33,0x04,0x40,0x04,0x30,0x04,0x3C,0x04,0x3C,0x04,0x4B };
+static const unsigned char kQmTail[kTailLen] = { 0x08,0,0,0, 0x00, 0x06,0,0,0, 0x04, 'N','A','V','I' };
 #ifdef UNDER_CE
 enum { kWatchMs = 30000 };
 #else
@@ -48,9 +64,15 @@ static wchar_t g_exe[MAX_PATH], g_exeBak[MAX_PATH], g_exeBak2[MAX_PATH];
 static wchar_t g_cfg[MAX_PATH], g_cfgBak[MAX_PATH], g_cfgTmp[MAX_PATH];
 static wchar_t g_launch[MAX_PATH], g_new[MAX_PATH], g_old[MAX_PATH];
 static wchar_t g_journal[MAX_PATH];
+static wchar_t g_qm[MAX_PATH], g_qmBak[MAX_PATH];   // the shell's translation: the "Navigation" button caption
+static int   g_qmState;                             // QM_*: what that caption is now
+static wchar_t g_icon[MAX_PATH], g_iconBak[MAX_PATH];   // the shell's "Navigation" button tile
+static int   g_iconState;                               // ICON_*: which art that tile is
 
 // detection
 enum { EXE_MISSING, EXE_CLEAN, EXE_PATCHED, EXE_UNKNOWN };
+enum { QM_MISSING, QM_FACTORY, QM_PATCHED, QM_UNKNOWN };
+enum { ICON_MISSING, ICON_FACTORY, ICON_VESTA, ICON_OTHER };
 static int   g_exeState;
 static DWORD g_loopOff;              // offset of "127.0.0.1" in the exe (EXE_CLEAN)
 static int   g_cfgOurs;              // ExternNavi.cfg starts with our line
@@ -142,6 +164,12 @@ static void SetPaths()
     Join(g_new, g_sd, L"VestaLaunch.new");
     Join(g_old, g_sd, L"VestaLaunch.old");
     Join(g_journal, g_sd, L"VestaLaunch_install.jrn");
+    Join(g_qm, g_appDir, L"language\\language_cn.qm");
+    wcscpy(g_qmBak, g_qm);
+    wcscat(g_qmBak, L".vlaunch.bak");
+    Join(g_icon, g_appDir, L"res\\img\\Itelma\\MMC27\\Temp\\main\\main_symbol_navigation.png");
+    wcscpy(g_iconBak, g_icon);
+    wcscat(g_iconBak, L".vlaunch.bak");
 }
 
 // ---------------------------------------------------------------- files
@@ -361,6 +389,58 @@ static void ScanExe(int* nOld, int* nNew, DWORD* offOld)
     CloseHandle(h);
 }
 
+// ---------------------------------------------------------------- the shell's button caption (language_cn.qm)
+// The shell draws the translation of "NAVI" on its "Navigation" button. Counting occurrences of a caption
+// directly followed by that source tells the button entry from the three "Навигация" inside sentences.
+
+static int CountCap(const unsigned char* d, DWORD size, const unsigned char* cap)
+{
+    int n = 0;
+    for (DWORD i = 0; i + kCapLen + kTailLen <= size; i++)
+        if (!memcmp(d + i, cap, kCapLen) && !memcmp(d + i + kCapLen, kQmTail, kTailLen))
+            n++;
+    return n;
+}
+
+static void DetectQm()
+{
+    if (!Exists(g_qm)) {
+        g_qmState = QM_MISSING;
+        return;
+    }
+    DWORD size;
+    unsigned char* d = (unsigned char*)ReadAll(g_qm, &size);
+    g_qmState = QM_UNKNOWN;
+    if (d) {
+        int nOld = CountCap(d, size, kNavCap), nNew = CountCap(d, size, kPrgCap);
+        g_qmState = nOld == 1 && nNew == 0 ? QM_FACTORY : nOld == 0 && nNew == 1 ? QM_PATCHED : QM_UNKNOWN;
+        free(d);
+    }
+}
+
+// "Навигация" -> "Программы" in place; the file is read back to check the result. The shell loads its
+// translations at start-up and does not keep the file open, so this also works while it runs (on a fresh
+// install it is closed here anyway: step 2 closed it).
+static int PatchQm()
+{
+    DWORD size;
+    unsigned char* d = (unsigned char*)ReadAll(g_qm, &size);
+    if (!d)
+        return 0;
+    DWORD at = 0;
+    int found = 0;
+    for (DWORD i = 0; !found && i + kCapLen + kTailLen <= size; i++)
+        if (!memcmp(d + i, kNavCap, kCapLen) && !memcmp(d + i + kCapLen, kQmTail, kTailLen)) {
+            at = i;
+            found = 1;
+        }
+    if (found)
+        memcpy(d + at, kPrgCap, kCapLen);
+    int ok = found && WriteBytes(g_qm, d, size) && SameAs(g_qm, d, size);
+    free(d);
+    return ok;
+}
+
 // ---------------------------------------------------------------- payload (VestaLaunch.exe + Skin\...)
 // [u32 count][count x (u16 nameLen, name UTF-8 with '/', u32 dataLen, data)][u32 CRC-32 of all before]
 
@@ -380,16 +460,20 @@ static unsigned long Crc32(const unsigned char* p, DWORD n)
 static unsigned ReadU16(const unsigned char* p) { return p[0] | (p[1] << 8); }
 static unsigned long ReadU32(const unsigned char* p) { return p[0] | (p[1] << 8) | (p[2] << 16) | ((unsigned long)p[3] << 24); }
 
-static int GetPayload(Payload* pl)
+// An embedded RCDATA block (payload.bin and the two button tiles).
+static int GetRes(int id, Payload* pl)
 {
-    HRSRC r = FindResource(NULL, MAKEINTRESOURCE(IDR_PAYLOAD), RT_RCDATA);
+    HRSRC r = FindResource(NULL, MAKEINTRESOURCE(id), RT_RCDATA);
     if (!r)
         return 0;
     pl->size = SizeofResource(NULL, r);
     pl->base = (const unsigned char*)LockResource(LoadResource(NULL, r));
-    if (!pl->base || pl->size < 8)
-        return 0;
-    return Crc32(pl->base, pl->size - 4) == ReadU32(pl->base + pl->size - 4);
+    return pl->base && pl->size > 0;
+}
+
+static int GetPayload(Payload* pl)
+{
+    return GetRes(IDR_PAYLOAD, pl) && pl->size >= 8 && Crc32(pl->base, pl->size - 4) == ReadU32(pl->base + pl->size - 4);
 }
 
 // Writes every file under dir and reads it back; returns the number of files, -1 on any error.
@@ -547,8 +631,8 @@ static int Watch()
 }
 
 // ---------------------------------------------------------------- journal
-// One word per line, written before each step ("exe" / "cfg" once their backup is verified):
-// "shell", "exe", "cfg", "cfg-none", "launch-old", "launch".
+// One word per line, written before each step ("exe" / "cfg" / "qm" / "icon" once their backup is verified):
+// "shell", "exe", "cfg", "cfg-none", "qm", "icon", "launch-old", "launch".
 
 static void Journal(const char* step)
 {
@@ -614,6 +698,24 @@ static int Rollback()
         DeleteFile(g_cfg);
         Say(L"  ExternNavi.cfg удалён (его не было)");
     }
+    if (Journaled(j, "qm") && Exists(g_qmBak) && Diff(g_qmBak, g_qm, NULL) != 0) {
+        if (CopyChecked(g_qmBak, g_qm)) {
+            DeleteFile(g_qmBak);
+            Say(L"  language_cn.qm восстановлен");
+        } else {
+            Say(L"  НЕ удалось восстановить language_cn.qm (копия: %s)", g_qmBak);
+            ok = 0;
+        }
+    }
+    if (Journaled(j, "icon") && Exists(g_iconBak) && Diff(g_iconBak, g_icon, NULL) != 0) {
+        if (CopyChecked(g_iconBak, g_icon)) {
+            DeleteFile(g_iconBak);
+            Say(L"  main_symbol_navigation.png восстановлен");
+        } else {
+            Say(L"  НЕ удалось восстановить main_symbol_navigation.png (копия: %s)", g_iconBak);
+            ok = 0;
+        }
+    }
     if (Journaled(j, "exe") && Exists(g_exeBak) && Diff(g_exeBak, g_exe, NULL) != 0) {
         if (CloseShell() && CopyChecked(g_exeBak, g_exe)) {
             DeleteFile(g_exeBak);
@@ -639,6 +741,22 @@ static int Rollback()
 
 // ---------------------------------------------------------------- state
 
+// The shell's button tile: on the factory firmware the 179x182 art; ours is the same tile with an app grid
+// instead of the arrow. A tile that is neither (another skin's art) is left alone.
+static void DetectIcon()
+{
+    Payload orig, vesta;
+    if (!Exists(g_icon)) {
+        g_iconState = ICON_MISSING;
+    } else if (!GetRes(IDR_ICONFACTORY, &orig)) {
+        g_iconState = ICON_OTHER;   // nothing to compare with: better leave the file alone
+    } else if (SameAs(g_icon, orig.base, orig.size)) {
+        g_iconState = ICON_FACTORY;
+    } else {
+        g_iconState = GetRes(IDR_ICONVESTA, &vesta) && SameAs(g_icon, vesta.base, vesta.size) ? ICON_VESTA : ICON_OTHER;
+    }
+}
+
 static void Detect()
 {
     SetPaths();
@@ -653,6 +771,8 @@ static void Detect()
     char* cfg = ReadAll(g_cfg, &size);
     g_cfgOurs = cfg && !strncmp(cfg, kCfgLine, strlen(kCfgLine)) && (cfg[strlen(kCfgLine)] == '\r' || cfg[strlen(kCfgLine)] == '\n');
     free(cfg);
+    DetectQm();
+    DetectIcon();
     wchar_t exe[MAX_PATH];
     Join(exe, g_launch, kLauncher);
     g_hasLaunch = Exists(exe);
@@ -825,7 +945,46 @@ static int DoInstall()
         return Fail(L"ExternNavi.cfg не записан");
     Say(L"  3. ExternNavi.cfg: VestaLaunch первым пунктом");
 
-    // 4. the new launcher in place, an older one aside
+    // 4. the shell's button caption in language_cn.qm
+    if (g_qmState == QM_FACTORY) {
+        if (!CopyChecked(g_qm, g_qmBak)) {
+            DeleteFile(g_qmBak);
+            return Fail(L"не удалось сделать копию language_cn.qm");
+        }
+        Journal("qm");   // from here on the verified copy restores the caption
+        if (!PatchQm())
+            return Fail(L"надпись кнопки в language_cn.qm не изменена");
+        Say(L"  4. language_cn.qm: надпись кнопки «Навигация» → «Программы»");
+    } else if (g_qmState == QM_PATCHED) {
+        Say(L"  4. language_cn.qm уже с надписью «Программы» — не трогаю");
+    } else if (g_qmState == QM_MISSING) {
+        Say(L"  4. language_cn.qm нет — надпись кнопки не правится");
+    } else {
+        Say(L"  4. language_cn.qm: надпись кнопки не распознана — не трогаю");
+    }
+
+    // 5. the shell's "Navigation" button tile
+    if (g_iconState == ICON_FACTORY) {
+        Payload vesta;
+        if (!GetRes(IDR_ICONVESTA, &vesta))
+            return Fail(L"в установщике нет значка кнопки");
+        if (!CopyChecked(g_icon, g_iconBak)) {
+            DeleteFile(g_iconBak);
+            return Fail(L"не удалось сделать копию main_symbol_navigation.png");
+        }
+        Journal("icon");   // from here on the verified copy restores the tile
+        if (!WriteBytes(g_icon, vesta.base, vesta.size) || !SameAs(g_icon, vesta.base, vesta.size))
+            return Fail(L"значок кнопки не записан");
+        Say(L"  5. main_symbol_navigation.png: значок кнопки заменён");
+    } else if (g_iconState == ICON_VESTA) {
+        Say(L"  5. main_symbol_navigation.png уже наш — не трогаю");
+    } else if (g_iconState == ICON_MISSING) {
+        Say(L"  5. main_symbol_navigation.png нет — значок кнопки не меняется");
+    } else {
+        Say(L"  5. main_symbol_navigation.png: не заводской — не трогаю");
+    }
+
+    // 6. the new launcher in place, an older one aside
     if (DirExists(g_launch)) {
         Journal("launch-old");
         RemoveTree(g_old);
@@ -837,11 +996,11 @@ static int DoInstall()
     Join(exe, g_launch, kLauncher);
     if (!MoveFile(g_new, g_launch) || !Exists(exe))
         return Fail(L"VestaLaunch не встал на место");
-    Say(L"  4. VestaLaunch на месте: %s", g_launch);
+    Say(L"  6. VestaLaunch на месте: %s", g_launch);
 
-    // 5. the patched shell must come up and stay up
+    // 7. the patched shell must come up and stay up
     if (patch) {
-        Say(L"  5. запуск оболочки, проверка %d с…", kWatchMs / 1000);
+        Say(L"  7. запуск оболочки, проверка %d с…", kWatchMs / 1000);
         StartShell();
         if (!Watch())
             return Fail(L"оболочка не работает после патча");
@@ -851,8 +1010,9 @@ static int DoInstall()
     RemoveTree(g_old);
     DeleteFile(g_cfgBak);   // the exe backup stays: "Uninstall" restores the factory exe from it
     DeleteFile(g_journal);
-    Say(L"ГОТОВО. Кнопка «Навигация» открывает VestaLaunch.");
     Detect();
+    Say(g_qmState == QM_PATCHED ? L"ГОТОВО. Кнопка «Программы» открывает VestaLaunch."
+                                : L"ГОТОВО. Кнопка оболочки открывает VestaLaunch.");
     return 1;
 }
 
@@ -897,6 +1057,24 @@ static int DoUninstall()
     } else {
         Say(L"  G3NavHMI.exe не патчился этим установщиком — не трогаю");
     }
+    if (Exists(g_qmBak)) {   // we changed the button caption: back to the factory one
+        if (CopyChecked(g_qmBak, g_qm)) {
+            DeleteFile(g_qmBak);
+            Say(L"  language_cn.qm восстановлен из копии");
+        } else {
+            Say(L"  НЕ удалось восстановить language_cn.qm (копия: %s)", g_qmBak);
+            ok = 0;
+        }
+    }
+    if (Exists(g_iconBak)) {   // we changed the button tile: back to the factory one
+        if (CopyChecked(g_iconBak, g_icon)) {
+            DeleteFile(g_iconBak);
+            Say(L"  main_symbol_navigation.png восстановлен из копии");
+        } else {
+            Say(L"  НЕ удалось восстановить main_symbol_navigation.png (копия: %s)", g_iconBak);
+            ok = 0;
+        }
+    }
     RemoveTree(g_launch);
     RemoveTree(g_old);
     RemoveTree(g_new);
@@ -916,8 +1094,11 @@ static void DoStatus()
     g_status[0] = 0;
     Detect();
     static const wchar_t* exe[4] = { L"нет", L"не пропатчен", L"пропатчен (127.0.0.2)", L"незнакомая прошивка" };
-    Say(L"G3NavHMI.exe: %s; ExternNavi.cfg: %s; VestaLaunch: %s%s%s", exe[g_exeState],
-        g_cfgOurs ? L"VestaLaunch первым" : L"без VestaLaunch", g_hasLaunch ? L"установлен" : L"нет",
+    static const wchar_t* qm[4] = { L"нет", L"надпись «Навигация»", L"надпись «Программы»", L"не распознан" };
+    static const wchar_t* icon[4] = { L"нет", L"заводской", L"наш", L"другой" };
+    Say(L"G3NavHMI.exe: %s; ExternNavi.cfg: %s; VestaLaunch: %s; language_cn.qm: %s; значок кнопки: %s%s%s",
+        exe[g_exeState], g_cfgOurs ? L"VestaLaunch первым" : L"без VestaLaunch",
+        g_hasLaunch ? L"установлен" : L"нет", qm[g_qmState], icon[g_iconState],
         g_hasJournal ? L"; прерванная установка!" : L"", g_bootFlag ? L"; заряжено загрузочное обновление!" : L"");
 }
 
@@ -983,12 +1164,15 @@ static void Paint(HDC hdc)
     Text(dc, 20, 0, 780, 54, L"УСТАНОВКА VESTALAUNCH", C_TEXT, g_fontB, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     static const wchar_t* exe[4] = { L"не найден", L"не пропатчен", L"пропатчен (127.0.0.2)", L"НЕЗНАКОМАЯ ПРОШИВКА" };
     wchar_t s[600];
+    static const wchar_t* qm[4] = { L"нет", L"«Навигация»", L"«Программы»", L"не распознана" };
+    static const wchar_t* icon[4] = { L"нет", L"заводской", L"наш", L"другой" };
     _snwprintf(s, 600,
                L"Оболочка: %s\\G3NavHMI.exe — %s\n"
                L"ExternNavi.cfg: %s     VestaLaunch: %s\n"
+               L"Кнопка «Навигация»: %s, значок: %s\n"
                L"%s%s",
                g_appDir, exe[g_exeState], g_cfgOurs ? L"VestaLaunch первым" : L"без VestaLaunch",
-               g_hasLaunch ? L"установлен" : L"не установлен",
+               g_hasLaunch ? L"установлен" : L"не установлен", qm[g_qmState], icon[g_iconState],
                g_hasJournal ? L"Прерванная установка — будет откачена.  " : L"",
                g_bootFlag ? L"Заряжено загрузочное обновление — установка невозможна." : L"");
     Text(dc, 20, 66, 780, 150, s, C_MUTED, g_fontS, DT_LEFT | DT_WORDBREAK);

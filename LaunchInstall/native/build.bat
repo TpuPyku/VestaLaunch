@@ -15,7 +15,7 @@ if not exist obj\arm mkdir obj\arm
 if not exist obj\pc  mkdir obj\pc
 if not exist "%OUT%" mkdir "%OUT%"
 
-rem resources: payload.bin (the current VestaLaunch build + its Skin, packed every time) + icon
+rem resources: payload.bin (the current VestaLaunch build + its Skin, packed every time) + the two button tiles
 python make_payload.py
 if errorlevel 1 goto fail
 "%VC%\bin\rc.exe" /fo obj\payload.res resources.rc

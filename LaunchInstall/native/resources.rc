@@ -1,6 +1,11 @@
-// The embedded VestaLaunch (payload.bin from make_payload.py) and the program icon (VestaLaunch's).
-#define IDR_PAYLOAD 101
-IDR_PAYLOAD RCDATA "payload.bin"
+// The embedded VestaLaunch (payload.bin from make_payload.py), the program icon (VestaLaunch's) and the two
+// "Navigation" button tiles the installer swaps: the factory one it looks for and ours it puts in its place.
+#define IDR_PAYLOAD     101
+#define IDR_ICONFACTORY 102
+#define IDR_ICONVESTA   103
+IDR_PAYLOAD     RCDATA "payload.bin"
+IDR_ICONFACTORY RCDATA "icon_factory.png"
+IDR_ICONVESTA   RCDATA "icon_vesta.png"
 1 ICON "../../native/app.ico"
 #ifdef PC_BUILD
 // PC test build: no elevation prompt (see pc.manifest)

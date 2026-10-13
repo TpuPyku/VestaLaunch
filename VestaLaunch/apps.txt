@@ -1,0 +1,11 @@
+# Programs of the "Apps" screen: one per line, "Name | full path to the exe".
+# Lines starting with # are ignored. Save the file as UTF-8.
+# The started program is raised above the stock shell. If it starts another program (a launcher,
+# a MortScript), name the window to raise as the third field: "Name | path | class!title".
+# The fourth field is the program's command line: "Name | path | | parameters" (third field may be empty).
+# The fifth field is an own icon: "Name | path | | | Icons\name.png" - a .png (up to 256 x 256), .ico or
+# an exe/dll to take the icon from; a path without a drive/root is from the launcher's folder.
+# Shortcuts changed on the "Apps" screen rewrite this file; comments other than these are not kept.
+Яндекс карты | \SDMMC\YaMapsCE\YaMapsCE.exe
+OSM карты | \SDMMC\OSMapsCE\OSMapsCE.exe
+CityGuide | \SDMMC\Navi\CityGuide\CityGuideCE.exe
