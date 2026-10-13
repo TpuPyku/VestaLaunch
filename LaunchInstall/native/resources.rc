@@ -1,0 +1,8 @@
+// The embedded VestaLaunch (payload.bin from make_payload.py) and the program icon (VestaLaunch's).
+#define IDR_PAYLOAD 101
+IDR_PAYLOAD RCDATA "payload.bin"
+1 ICON "../../native/app.ico"
+#ifdef PC_BUILD
+// PC test build: no elevation prompt (see pc.manifest)
+1 24 "pc.manifest"
+#endif
