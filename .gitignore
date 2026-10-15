@@ -30,3 +30,6 @@
 *.exe
 *.out
 *.app
+
+# Logs (PC test runs write them next to the exe)
+*.log
