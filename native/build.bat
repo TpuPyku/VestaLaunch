@@ -11,6 +11,15 @@ set SRC=launch.cpp
 set OUT=..\VestaLaunch
 
 cd /d "%~dp0"
+
+rem VestaCore (shared with VestaHome, OSMapsCE): a working copy of the VestaCore repo next to this repo if there
+rem is one (development: its latest code), otherwise the submodule core\ (a clone from GitHub)
+set CORE=%~dp0..\..\VestaCore
+if not exist "%CORE%\vtask.cpp" set CORE=%~dp0..\core
+if not exist "%CORE%\vtask.cpp" goto nocore
+echo === VestaCore: %CORE%
+set SRC=%SRC% "%CORE%\vtask.cpp"
+
 if not exist obj\arm mkdir obj\arm
 if not exist obj\pc  mkdir obj\pc
 if not exist "%OUT%" mkdir "%OUT%"
@@ -22,7 +31,7 @@ if errorlevel 1 goto fail
 echo === ARM (Windows CE)
 "%VC%\ce\bin\x86_arm\cl.exe" /nologo /O2 /W3 /GS- /TP /c %SRC% /Foobj\arm\ ^
   /DUNICODE /D_UNICODE /DUNDER_CE=0x420 /D_WIN32_WCE=0x420 /DWINCE /DARM /D_ARM_ /DARMV4 /DNDEBUG ^
-  /I"%SDK%\Include" /I"%VC%\ce\include"
+  /I"%SDK%\Include" /I"%VC%\ce\include" /I"%CORE%"
 if errorlevel 1 goto fail
 "%VC%\ce\bin\x86_arm\link.exe" /nologo /SUBSYSTEM:WINDOWSCE,4.20 /MACHINE:ARM /OUT:"%OUT%\VestaLaunch.exe" ^
   obj\arm\*.obj obj\app.res /LIBPATH:"%SDK%\Lib\armv4" /LIBPATH:"%VC%\ce\lib\armv4" ^
@@ -32,7 +41,7 @@ if errorlevel 1 goto fail
 echo === x86 (desktop test build)
 "%VC%\bin\cl.exe" /nologo /O2 /W3 /MT /TP /c %SRC% /Foobj\pc\ ^
   /DUNICODE /D_UNICODE /DWIN32 /DNDEBUG /D_CRT_SECURE_NO_WARNINGS ^
-  /I"%VC%\include" /I"%VC%\PlatformSDK\Include"
+  /I"%VC%\include" /I"%VC%\PlatformSDK\Include" /I"%CORE%"
 if errorlevel 1 goto fail
 "%VC%\bin\link.exe" /nologo /SUBSYSTEM:WINDOWS /OUT:"%OUT%\VestaLaunchPC.exe" obj\pc\*.obj obj\app.res ^
   /LIBPATH:"%VC%\lib" /LIBPATH:"%VC%\PlatformSDK\Lib" user32.lib gdi32.lib kernel32.lib shell32.lib
@@ -40,6 +49,8 @@ if errorlevel 1 goto fail
 
 echo === OK
 exit /b 0
+:nocore
+echo === VestaCore not found: git submodule update --init (core\) or the sibling repo ..\..\VestaCore
 :fail
 echo === BUILD FAILED
 exit /b 1

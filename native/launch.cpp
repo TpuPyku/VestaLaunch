@@ -24,6 +24,7 @@
 #define STBI_NO_THREAD_LOCALS
 #define STBI_ASSERT(x) ((void)0)
 #include "stb_image.h"
+#include "vtask.h"   // VestaCore: the task manager's processes, windows and load
 
 #define APP_CLASS L"VestaLaunch_Wnd"
 
@@ -43,22 +44,27 @@ static const COLORREF kTriOr[4] = { RGB(0x8f, 0x36, 0x08), RGB(0xc2, 0x4a, 0x0b)
 
 // ---------------------------------------------------------------- layout
 
-enum Icon { IC_NONE, IC_BACK, IC_NEXT, IC_EDIT, IC_ADD, IC_FOLDER, IC_FILE, IC_UP, IC_SHIFT, IC_BKSP, IC_COUNT };
+enum Icon { IC_NONE, IC_BACK, IC_NEXT, IC_EDIT, IC_ADD, IC_FOLDER, IC_FILE, IC_UP, IC_SHIFT, IC_BKSP, IC_TASKS,
+            IC_COUNT };
 
 // Picture names in skin.ini (and Skin\<name>.png), by icon; NULL = no picture, always the built-in drawing.
 static const wchar_t* kIconKey[IC_COUNT] = { NULL, L"prev", L"next", L"edit", L"add", L"folder", L"file",
     L"up", L"shift", L"backspace" };
 
 enum Action { A_NONE, A_BACK, A_RUN, A_ADD, A_PREV, A_NEXT, A_EDITMODE, A_FIELD, A_SAVE, A_DELETE, A_CANCEL,
-              A_OK, A_KEY, A_SHIFT, A_LANG, A_BKSP, A_FILE, A_UP, A_NOICON };
+              A_OK, A_KEY, A_SHIFT, A_LANG, A_BKSP, A_FILE, A_UP, A_NOICON, A_TASKS, A_TASKBACK, A_TASKTAB,
+              A_TASKSORT, A_TASKPAGE, A_TASKKILL, A_TASKSWITCH, A_TASKCLOSE, A_KEYFIELD, A_CLIPCOPY,
+              A_CLIPPASTE, A_CLIPCLEAR };
 
-// S_EDIT: one shortcut; S_KEYS: on-screen keyboard for its name/parameters; S_FILES: picking its exe.
-enum Screen { S_APPS, S_EDIT, S_KEYS, S_FILES };
+// S_EDIT: one shortcut; S_KEYS: on-screen keyboard for its name/parameters; S_FILES: picking its exe;
+// S_TASKS: the task manager (processes, windows, CPU and memory).
+enum Screen { S_APPS, S_EDIT, S_KEYS, S_FILES, S_TASKS };
 
 struct Btn {
     RECT        rc;
     Action      action;
-    int         arg;       // A_RUN: index in s_apps; A_FIELD: F_*; A_KEY: character; A_FILE: index in s_files
+    int         arg;       // A_RUN: index in s_apps; A_FIELD: F_*; A_KEY: character; A_FILE: index in s_files;
+                           // A_TASKKILL: process id; A_TASKSWITCH, A_TASKCLOSE: the window (HWND)
 };
 
 // VestaHome answers "is it night?" with 1 at night. WM_VESTA_SHOW: a second start (by the shell or VestaHome)
@@ -112,6 +118,10 @@ enum { TIMER_GUARD = 3, kGuardMs = 500, kBlackMs = 10000 };
 static HANDLE s_guard;        // process of the program in front; NULL = no guard
 static DWORD  s_guardPid;
 static DWORD  s_guardSeen;    // GetTickCount() when a visible window of the process was last seen
+static HWND   s_backWnd;      // the black backdrop under a program (see PutBackdropUnder)
+static bool   s_reverse;      // the reverse gear is in (the shell shows the camera): nothing of ours is raised
+static void   PutBackdropUnder(HWND top);
+static void   HideBackdrop();
 enum { kMaxApps = 64, kAppsPerPage = 8 };
 static App   s_apps[kMaxApps];
 static int   s_appCount;
@@ -127,6 +137,7 @@ static bool  s_delArmed;          // "Delete" was pressed once; the second press
 static int     s_keysField;       // F_NAME or F_PARAMS
 static wchar_t s_keysText[200];
 static bool    s_keysEn, s_keysShift;
+static bool    s_clipMenu;       // "Copy" / "Paste" shown in place of the text field
 
 // File browser for the program path: folders and .exe files of s_fdir.
 struct FileEnt { wchar_t name[100]; bool dir; };
@@ -156,6 +167,7 @@ static wchar_t s_dir[MAX_PATH];
 static wchar_t s_status[96];    // last action result, shown in the status bar
 static HWND    s_under;         // the window we were opened over (the shell, whichever it is): "Back" returns to it
 enum { TIMER_FRONT = 4, kFrontMs = 4000 };
+enum { TIMER_LONG = 6, kLongMs = 600 };   // a long press (the keyboard's text field)
 static DWORD   s_frontTick;     // when we were asked to the front: kept there for kFrontMs
 #ifdef UNDER_CE
 static HWND    s_taskbar;
@@ -325,6 +337,12 @@ static void PaintIcon(HDC dc, Icon ic, int x, int y, int size, COLORREF c)
         p.Line(v, 6);
         p.L2(23, 18, 35, 30);
         p.L2(35, 18, 23, 30);
+        break;
+    }
+    case IC_TASKS: {   // task manager: a screen with the load's pulse (as in VestaHome)
+        double v[] = { 10, 26, 17, 26, 21, 17, 27, 33, 31, 23, 38, 23 };
+        p.Box(5, 9, 43, 39, 4);
+        p.Line(v, 6);
         break;
     }
     default:
@@ -802,6 +820,7 @@ static void DrawApps(HDC dc)
             dx += dw + 8;
         }
     }
+    Button(dc, 16, 410, 184, 58, L"ЗАДАЧИ", B_N, IC_TASKS, 17, 0, A_TASKS);
     Button(dc, 600, 410, 184, 58, L"ИЗМЕНИТЬ", s_editMode ? B_SEL : B_N, IC_EDIT, 17, 0, A_EDITMODE);
 }
 
@@ -844,9 +863,18 @@ static void DrawEdit(HDC dc)
 static void DrawKeys(HDC dc)
 {
     Frame(dc, s_keysField == F_NAME ? L"НАЗВАНИЕ" : L"ПАРАМЕТРЫ ЗАПУСКА", A_CANCEL);
-    R(dc, 16, 68, 600, 60, 10, kPanel, kLine);
-    int end = TTail(dc, 32, 106, s_keysText, 26, kText, 700, 560);
-    R(dc, end + 4, 84, 3, 28, 0, kOrange);
+    if (s_clipMenu) {   // after a long press on the field, in its place; any other tap closes it
+        Button(dc, 16, 68, 194, 60, L"КОПИРОВАТЬ", s_keysText[0] ? B_FILL : B_N, IC_NONE, 17, 0,
+               s_keysText[0] ? A_CLIPCOPY : A_NONE);
+        Button(dc, 219, 68, 194, 60, L"ВСТАВИТЬ", B_FILL, IC_NONE, 17, 0, A_CLIPPASTE);
+        Button(dc, 422, 68, 194, 60, L"ОЧИСТИТЬ", s_keysText[0] ? B_FILL : B_N, IC_NONE, 17, 0,
+               s_keysText[0] ? A_CLIPCLEAR : A_NONE);
+    } else {
+        Zone(16, 68, 600, 60, A_KEYFIELD);   // a long press: copy / paste (TIMER_LONG)
+        R(dc, 16, 68, 600, 60, 10, kPanel, kLine);
+        int end = TTail(dc, 32, 106, s_keysText, 26, kText, 700, 560);
+        R(dc, end + 4, 84, 3, 28, 0, kOrange);
+    }
     Button(dc, 628, 68, 156, 60, L"ГОТОВО", B_PRI, IC_NONE, 18, 0, A_OK);
     const wchar_t** rows = s_keysEn ? kKeysEn : kKeysRu;
     for (int r = 0; r < 4; r++)
@@ -894,6 +922,8 @@ static void DrawFiles(HDC dc)
     Button(dc, 664, 410, 120, 58, L"ОТМЕНА", B_N, IC_NONE, 18, 0, A_CANCEL);
 }
 
+static void DrawTasks(HDC dc);
+
 static void DrawFrame(HDC dc)
 {
     Background(dc);
@@ -903,6 +933,7 @@ static void DrawFrame(HDC dc)
     case S_EDIT:  DrawEdit(dc); break;
     case S_KEYS:  DrawKeys(dc); break;
     case S_FILES: DrawFiles(dc); break;
+    case S_TASKS: DrawTasks(dc); break;
     }
 }
 
@@ -1349,6 +1380,17 @@ static BOOL CALLBACK EnumGuardShown(HWND h, LPARAM lp)
     return TRUE;
 }
 
+static BOOL CALLBACK EnumGuardTop(HWND h, LPARAM lp)   // the first (topmost) visible window of the program
+{
+    DWORD pid = 0;
+    GetWindowThreadProcessId(h, &pid);
+    if (pid == s_guardPid && IsWindowVisible(h)) {
+        *(HWND*)lp = h;
+        return FALSE;
+    }
+    return TRUE;
+}
+
 struct Guarded { HWND h[16]; int n; };
 
 static BOOL CALLBACK EnumGuard(HWND h, LPARAM lp)
@@ -1381,6 +1423,7 @@ static void OnGuardTimer()
         // (When the shell ends the navigation itself, Exit_Navi has already stopped this guard.)
         StopGuard();
         DropRaised();
+        HideBackdrop();
         Log(L"program closed: back to the launcher");
         ShowFront();
         return;
@@ -1397,6 +1440,8 @@ static void OnGuardTimer()
     HWND front = GetForegroundWindow();
     if (front && (front == s_under || front == FindWindow(HOME_CLASS, NULL)))
         return;   // the user went back to the shell / VestaHome
+    if (s_reverse)
+        return;   // the camera is up: nothing is raised over it
     Guarded g;
     g.n = 0;
     EnumWindows(EnumGuard, (LPARAM)&g);   // top to bottom
@@ -1418,6 +1463,7 @@ static void OnWaitTimer()
     if (f.found) {
         KillTimer(s_wnd, TIMER_WAIT);
         SetWindowPos(f.found, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+        PutBackdropUnder(f.found);   // a tap beside a smaller window must not reach the shell
         SetForegroundWindow(f.found);
         if (s_raisedCount < kMaxRaised)
             s_raised[s_raisedCount++] = f.found;
@@ -1433,6 +1479,229 @@ static void OnWaitTimer()
         _snwprintf(s_status, 96, L"окно не найдено: %s", s_apps[s_waitApp].name);
         s_waitApp = -1;
     }
+}
+
+// ---------------------------------------------------------------- task manager
+
+// "Tasks" in the dock: processes and windows (VestaCore vtask), the CPU and memory graphs over the last
+// 2 minutes; the same screen as VestaHome's. Sampled every 2 s while the screen is in front, never in the
+// background. A process ends on the second press of its button; system ones and the launcher itself can't.
+
+enum { kTaskRows = 5 };
+static TaskInfo s_task;
+static int      s_taskTab;       // 0 processes, 1 windows
+static int      s_taskPage;
+static DWORD    s_taskArm;       // the process whose "End" was pressed once
+static int      s_taskTicks;
+
+static void TasksOpen()
+{
+    if (!s_task.procCount && !s_task.histCount) {   // the first time: the busiest first
+        s_task.sortKey = TS_CPU;
+        s_task.sortDesc = true;
+    }
+    s_taskPage = 0;
+    s_taskArm = 0;
+    TaskSample(&s_task, s_wnd);
+}
+
+static int TaskPages()
+{
+    int n = s_taskTab ? s_task.winCount : s_task.procCount;
+    return n ? (n + kTaskRows - 1) / kTaskRows : 1;
+}
+
+static void MemText(wchar_t* s, int n, DWORD kb)
+{
+    if (kb < 1024)
+        _snwprintf(s, n, L"%u КБ", (unsigned)kb);
+    else
+        _snwprintf(s, n, L"%u,%u МБ", (unsigned)(kb / 1024), (unsigned)(kb % 1024 * 10 / 1024));
+    s[n - 1] = 0;
+}
+
+static void TaskEnd(DWORD pid)
+{
+    int i = 0;
+    while (i < s_task.procCount && s_task.proc[i].pid != pid)
+        i++;
+    if (i == s_task.procCount)
+        return;
+    wchar_t name[40];
+    wcscpy(name, s_task.proc[i].name);
+    if (s_taskArm != pid) {
+        s_taskArm = pid;
+        _snwprintf(s_status, 96, L"ещё раз, чтобы завершить %s", name);
+        return;
+    }
+    s_taskArm = 0;
+    if (TaskKill(pid, name)) {
+        _snwprintf(s_status, 96, L"завершён: %s", name);
+        memmove(&s_task.proc[i], &s_task.proc[i + 1], (s_task.procCount - i - 1) * sizeof(TaskProc));
+        s_task.procCount--;
+    } else {
+        _snwprintf(s_status, 96, L"не завершается: %s", name);
+    }
+}
+
+static int TaskWinIndex(HWND h)
+{
+    for (int i = 0; i < s_task.winCount; i++)
+        if (s_task.win[i].h == h)
+            return i;
+    return -1;
+}
+
+static void TaskSwitch(HWND h)
+{
+    int i = TaskWinIndex(h);
+    if (i < 0 || !IsWindow(h)) {
+        wcscpy(s_status, L"окна уже нет");
+        return;
+    }
+    if (h == s_under) {   // the window we were opened over (the shell, VestaHome): plain "Back"
+        Minimize();
+        return;
+    }
+    // as a program started from here: on top with the backdrop under it, guarded, the launcher hides
+    s_status[0] = 0;
+    SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    PutBackdropUnder(h);
+    SetForegroundWindow(h);
+    if (s_raisedCount < kMaxRaised)
+        s_raised[s_raisedCount++] = h;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(h, &pid);
+    StartGuard(pid);
+    Log(L"task manager: switched to %s (pid %u)", s_task.win[i].title, (unsigned)pid);
+    ShowWindow(s_wnd, SW_HIDE);
+}
+
+static void TaskClose(HWND h)
+{
+    int i = TaskWinIndex(h);
+    if (i < 0 || !IsWindow(h)) {
+        wcscpy(s_status, L"окна уже нет");
+        return;
+    }
+    PostMessage(h, WM_CLOSE, 0, 0);
+    _snwprintf(s_status, 96, L"закрывается: %s", s_task.win[i].title);
+    memmove(&s_task.win[i], &s_task.win[i + 1], (s_task.winCount - i - 1) * sizeof(TaskWin));
+    s_task.winCount--;
+}
+
+// A graph panel: caption, value, the history (percent, newest at the right edge), a line at 50 %.
+static void TaskGraph(HDC dc, int x, int y, int w, const wchar_t* caption, const wchar_t* value,
+                      const unsigned char* hist, COLORREF c)
+{
+    R(dc, x, y, w, 104, 14, kPanel, kLine);
+    T(dc, x + 14, y + 26, caption, 15, kMuted, 700);
+    T(dc, x + w - 14, y + 26, value, 15, kText, 700, AL_END, w - 120);
+    int gx = x + 14, gy = y + 36, gw = w - 28, gh = 56;
+    Fill(dc, gx, gy + gh / 2, gx + gw, gy + gh / 2 + 1, kLine);
+    Fill(dc, gx, gy + gh, gx + gw, gy + gh + 2, kLine);
+    int n = s_task.histCount;
+    if (n < 2)
+        return;
+    POINT p[TASK_HIST];
+    for (int i = 0; i < n; i++) {
+        p[i].x = gx + (TASK_HIST - n + i) * gw / (TASK_HIST - 1);
+        p[i].y = gy + gh - hist[i] * gh / 100;
+    }
+    HPEN pen = CreatePen(PS_SOLID, 2, C(c));
+    HGDIOBJ old = SelectObject(dc, pen);
+    Polyline(dc, p, n);
+    SelectObject(dc, old);
+    DeleteObject(pen);
+}
+
+// A sort button; the current one is orange with a small triangle: down = the biggest first.
+static void TaskSortBtn(HDC dc, int x, const wchar_t* label, int key)
+{
+    bool cur = s_task.sortKey == key;
+    Button(dc, x, 176, 104, 48, label, cur ? B_SEL : B_N, IC_NONE, 16, 0, A_TASKSORT, key);
+    if (!cur)
+        return;
+    int cx = x + 92, cy = 200, d = s_task.sortDesc ? 1 : -1;
+    POINT t[3] = { { cx - 5, cy - 3 * d }, { cx + 5, cy - 3 * d }, { cx, cy + 3 * d } };
+    Poly(dc, t, 3, kInk);
+}
+
+static void DrawTasks(HDC dc)
+{
+    wchar_t s[96], a[24], b[24];
+    Frame(dc, L"ДИСПЕТЧЕР ЗАДАЧ", A_TASKBACK);
+    if (s_task.cpu10 >= 0)
+        _snwprintf(s, 96, L"%d %%", (s_task.cpu10 + 5) / 10);
+    else
+        wcscpy(s, L"...");
+    TaskGraph(dc, 16, 64, 380, L"ПРОЦЕССОР", s, s_task.cpuHist, kOrange);
+    DWORD total = s_task.memTotalKB, used = total - s_task.memAvailKB;
+    MemText(a, 24, used);
+    MemText(b, 24, total);
+    _snwprintf(s, 96, L"%s из %s · %u %%", a, b, total ? (unsigned)(used * 100 / total) : 0);
+    TaskGraph(dc, 404, 64, 380, L"ПАМЯТЬ", s, s_task.memHist, kText);
+
+    _snwprintf(s, 96, L"ПРОЦЕССЫ %d", s_task.procCount);
+    Button(dc, 16, 176, 172, 48, s, s_taskTab == 0 ? B_SEL : B_N, IC_NONE, 16, 0, A_TASKTAB, 0);
+    _snwprintf(s, 96, L"ОКНА %d", s_task.winCount);
+    Button(dc, 196, 176, 128, 48, s, s_taskTab == 1 ? B_SEL : B_N, IC_NONE, 16, 0, A_TASKTAB, 1);
+    if (s_taskTab == 0) {
+        TaskSortBtn(dc, 336, L"ИМЯ", TS_NAME);
+        TaskSortBtn(dc, 446, L"ЦП", TS_CPU);
+        TaskSortBtn(dc, 556, L"ПАМЯТЬ", TS_MEM);
+    }
+    int pages = TaskPages();
+    if (s_taskPage >= pages)
+        s_taskPage = pages - 1;
+    Button(dc, 668, 176, 40, 48, NULL, B_N, IC_BACK, 18, 24, A_TASKPAGE, -1);
+    _snwprintf(s, 96, L"%d/%d", s_taskPage + 1, pages);
+    T(dc, 726, 207, s, 15, kMuted, 600, AL_MID);
+    Button(dc, 744, 176, 40, 48, NULL, B_N, IC_NEXT, 18, 24, A_TASKPAGE, 1);
+
+    if (s_taskTab == 0 && !s_task.procOk) {
+        T(dc, 400, 350, L"Список процессов недоступен: нет toolhelp.dll", 18, kMuted, 600, AL_MID, 760);
+        return;
+    }
+    for (int k = 0; k < kTaskRows; k++) {
+        int i = s_taskPage * kTaskRows + k, y = 232 + k * 48;
+        if (s_taskTab == 0) {
+            if (i >= s_task.procCount)
+                break;
+            const TaskProc& p = s_task.proc[i];
+            bool self = p.pid == GetCurrentProcessId(), sys = TaskIsSystem(p.name);
+            R(dc, 16, y, 768, 44, 10, kPanel);
+            T(dc, 32, y + 29, p.name, 18, self ? kOrange : kText, 700, AL_START, 250);
+            _snwprintf(s, 96, L"%d пот.", p.threads);
+            T(dc, 296, y + 28, s, 15, kMuted, 400);
+            if (p.cpu10 >= 0)
+                _snwprintf(s, 96, L"%d,%d %%", p.cpu10 / 10, p.cpu10 % 10);
+            else
+                wcscpy(s, L"...");
+            T(dc, 470, y + 29, s, 17, p.cpu10 >= 200 ? kOrange : kText, 700, AL_END);
+            if (p.memKB)
+                MemText(s, 96, p.memKB);
+            else
+                wcscpy(s, L"-");
+            T(dc, 604, y + 29, s, 17, kText, 700, AL_END);
+            if (sys || self)
+                T(dc, 700, y + 28, sys ? L"система" : L"эта программа", 14, kDim, 600, AL_MID);
+            else
+                Button(dc, 624, y + 4, 152, 36, s_taskArm == p.pid ? L"ТОЧНО?" : L"ЗАВЕРШИТЬ",
+                       s_taskArm == p.pid ? B_PRI : B_N, IC_NONE, 15, 0, A_TASKKILL, (int)p.pid);
+        } else {
+            if (i >= s_task.winCount)
+                break;
+            const TaskWin& w = s_task.win[i];
+            R(dc, 16, y, 768, 44, 10, kPanel);
+            T(dc, 32, y + 29, w.title, 18, kText, 700, AL_START, 300);
+            T(dc, 346, y + 28, w.proc, 15, kMuted, 400, AL_START, 190);
+            Button(dc, 544, y + 4, 112, 36, L"ПЕРЕЙТИ", B_N, IC_NONE, 15, 0, A_TASKSWITCH, (int)(INT_PTR)w.h);
+            Button(dc, 664, y + 4, 112, 36, L"ЗАКРЫТЬ", B_N, IC_NONE, 15, 0, A_TASKCLOSE, (int)(INT_PTR)w.h);
+        }
+    }
+    if (s_taskTab == 1 && !s_task.winCount)
+        T(dc, 400, 350, L"Других окон нет", 18, kMuted, 600, AL_MID);
 }
 
 // ---------------------------------------------------------------- shortcut editor
@@ -1498,6 +1767,7 @@ static void OpenKeys(int field)
     s_keysField = field;
     wcscpy(s_keysText, field == F_NAME ? s_edit.name : s_edit.params);
     s_keysShift = false;
+    s_clipMenu = false;
     s_screen = S_KEYS;
 }
 
@@ -1519,6 +1789,59 @@ static void KeyBack()
     int n = (int)wcslen(s_keysText);
     if (n > 0)
         s_keysText[n - 1] = 0;
+}
+
+// ---- the clipboard on the keyboard screen: a long press on the text field (TIMER_LONG) shows "Copy",
+// "Paste" and "Clear" in its place. The text is copied whole; pasting adds to its end (the cursor is always there),
+// without line breaks and tabs, up to the field's length.
+
+static void ClipCopy()
+{
+    int n = (int)wcslen(s_keysText) + 1;
+    bool ok = false;
+    if (OpenClipboard(s_wnd)) {
+        EmptyClipboard();
+#ifdef UNDER_CE
+        HANDLE h = LocalAlloc(LMEM_FIXED, n * sizeof(wchar_t));   // CE: the clipboard takes local memory as is
+        if (h)
+            memcpy(h, s_keysText, n * sizeof(wchar_t));
+#else
+        HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, n * sizeof(wchar_t));
+        if (h) {
+            memcpy(GlobalLock(h), s_keysText, n * sizeof(wchar_t));
+            GlobalUnlock(h);
+        }
+#endif
+        ok = h && SetClipboardData(CF_UNICODETEXT, h);
+        CloseClipboard();
+    }
+    wcscpy(s_status, ok ? L"скопировано" : L"не скопировано");
+}
+
+static void ClipPaste()
+{
+    int n = (int)wcslen(s_keysText), cap = (s_keysField == F_NAME ? 47 : 199);
+    bool got = false;
+    if (OpenClipboard(s_wnd)) {
+        HANDLE h = GetClipboardData(CF_UNICODETEXT);
+#ifdef UNDER_CE
+        const wchar_t* p = (const wchar_t*)h;
+#else
+        const wchar_t* p = h ? (const wchar_t*)GlobalLock(h) : NULL;
+#endif
+        for (; p && *p && n < cap; p++)
+            if (*p >= L' ') {
+                s_keysText[n++] = *p;
+                got = true;
+            }
+        s_keysText[n] = 0;
+#ifndef UNDER_CE
+        if (h)
+            GlobalUnlock(h);
+#endif
+        CloseClipboard();
+    }
+    wcscpy(s_status, got ? L"вставлено" : L"в буфере нет текста");
 }
 
 static void KeysDone()
@@ -1713,11 +2036,46 @@ static void DropRaised()
     s_raisedCount = 0;
 }
 
-// A short log next to the exe (shows on the unit who covered us); cut when it grows over 32 KB.
+// Where the log goes. On the unit only removable media - the SD card or a USB disk, folder VestaLogs - never
+// the built-in flash (\SDMMC, \ResidentFlash, \StorageFlash wear out); without a card or a disk there is no
+// log. Looked up again every 30 s: a card can be put in later. PC: next to the exe.
+static bool LogDir(wchar_t* dir)
+{
+#ifdef UNDER_CE
+    static wchar_t s_logDir[MAX_PATH];
+    static DWORD   s_logDirTick;
+    static bool    s_logDirOk, s_logDirTried;
+    if (!s_logDirTried || GetTickCount() - s_logDirTick > 30000) {
+        static const wchar_t* vols[4] = { L"\\SDMemory", L"\\USB Disk", L"\\USBDisk", L"\\USBDevice" };
+        s_logDirTried = true;
+        s_logDirTick = GetTickCount();
+        s_logDirOk = false;
+        for (int i = 0; i < 4 && !s_logDirOk; i++) {
+            DWORD a = GetFileAttributes(vols[i]);
+            if (a == 0xFFFFFFFF || !(a & FILE_ATTRIBUTE_DIRECTORY))
+                continue;
+            _snwprintf(s_logDir, MAX_PATH, L"%s\\VestaLogs\\", vols[i]);
+            CreateDirectory(s_logDir, NULL);
+            DWORD b = GetFileAttributes(s_logDir);
+            s_logDirOk = b != 0xFFFFFFFF && (b & FILE_ATTRIBUTE_DIRECTORY);
+        }
+    }
+    if (s_logDirOk)
+        wcscpy(dir, s_logDir);
+    return s_logDirOk;
+#else
+    wcscpy(dir, s_dir);
+    return true;
+#endif
+}
+
+// A short log (shows on the unit who covered us), on removable media only; cut when it grows over 32 KB.
 static void Log(const wchar_t* fmt, ...)
 {
     wchar_t path[MAX_PATH], line[200];
-    _snwprintf(path, MAX_PATH, L"%sVestaLaunch.log", s_dir);
+    if (!LogDir(path))
+        return;
+    wcscat(path, L"VestaLaunch.log");
     va_list a;
     va_start(a, fmt);
     _vsnwprintf(line, 200, fmt, a);
@@ -1772,11 +2130,14 @@ static void NavEvent(const wchar_t* name)
     }
 }
 
+static bool s_navOn;   // the shell believes the navigation (we, or a program started from here) is running
+
 static void NavStarted()
 {
     NavEvent(L"Nav_Starting");
     Sleep(50);   // the shell takes them one by one, in its own thread
     NavEvent(L"Nav_Started");
+    s_navOn = true;
 }
 
 static void NavTerminated()
@@ -1784,6 +2145,7 @@ static void NavTerminated()
     NavEvent(L"Nav_Terminating");
     Sleep(50);
     NavEvent(L"Nav_Terminated");
+    s_navOn = false;
 }
 
 static DWORD WINAPI ExitNaviThread(LPVOID)
@@ -1804,6 +2166,7 @@ static void ShowFront()
     if (front && front != s_wnd)
         s_under = front;
     StopGuard();
+    HideBackdrop();
     ShowWindow(s_wnd, SW_SHOW);
 #ifdef UNDER_CE
     SetWindowPos(s_wnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
@@ -1818,7 +2181,7 @@ static void ShowFront()
 static void OnFrontTimer()
 {
     HWND front = GetForegroundWindow();
-    if (front != s_wnd && IsWindowVisible(s_wnd)) {
+    if (front != s_wnd && IsWindowVisible(s_wnd) && !s_reverse) {
         Log(L"covered by %s: raise again", ClassOf(front));
 #ifdef UNDER_CE
         SetWindowPos(s_wnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
@@ -1838,6 +2201,7 @@ static void Minimize()
     s_editMode = false;
     s_status[0] = 0;
     StopGuard();
+    HideBackdrop();
     KillTimer(s_wnd, TIMER_FRONT);
     if (s_under && IsWindow(s_under) && IsWindowVisible(s_under) && s_under != s_wnd) {
         DropRaised();
@@ -1848,6 +2212,187 @@ static void Minimize()
     }
     NavTerminated();
     Log(L"back: hidden, front now %s; Nav_Terminated set", ClassOf(GetForegroundWindow()));
+}
+
+// The shell's empty navigation screen in front. While the navigation is "on" for the shell, every time the
+// shell shows its external-navigation dialog (0x32B, CExternNaviDlg) - after the rear camera, on "Navigation"
+// pressed again, on a tap on its screen behind a smaller program window - it only tries to show the
+// navigator's window, and this firmware never gives it one (SetExternMainWindowHWND is never called, so
+// ExtShowNavi does nothing): the unit stays on a black screen until a reboot. AppLauncher watches the screen
+// for it (its "RadioBlackScreen" check); so do we. That dialog's background is exactly RGB(1,1,0) (set in its
+// constructor) and the display is full colour, so the colour is a mark: nothing else - neither a dark camera
+// picture nor a black window - paints 6 of 8 sample points in it. Seen twice in a row (2 s): the program
+// started from here comes back to the front, without one - the launcher.
+static int   s_shellNavHits;
+static DWORD s_shellNavLogTick;
+
+// ---- the backdrop: a black window of ours right under a program that does not fill the screen. Without it
+// a tap beside the program lands on the shell's (empty) navigation screen, the shell comes up over the program
+// and stays there. A tap on the backdrop brings the program back on top.
+
+static void HideBackdrop()
+{
+    if (s_backWnd && IsWindowVisible(s_backWnd))
+        ShowWindow(s_backWnd, SW_HIDE);
+}
+
+// The backdrop topmost, then the program's window topmost over it.
+static void PutBackdropUnder(HWND top)
+{
+    if (!s_backWnd || s_reverse)
+        return;
+    SetWindowPos(s_backWnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    SetWindowPos(top, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+}
+
+// The program started from here back on top (with the backdrop under it); false = there is none.
+static bool RaiseProgram()
+{
+    if (!s_guard || !Alive(s_guard))
+        return false;
+    HWND top = NULL;
+    EnumWindows(EnumGuardTop, (LPARAM)&top);   // its topmost visible window (they are listed top first)
+    if (!top)
+        return false;
+    PutBackdropUnder(top);
+    SetForegroundWindow(top);
+    return true;
+}
+
+// The navigation (we) back in front after the shell came up over it: the program, without one the launcher.
+static void BringBack(const wchar_t* why)
+{
+    if (s_reverse)
+        return;
+    if (RaiseProgram()) {
+        Log(L"%s: program (pid %u) back in front", why, (unsigned)s_guardPid);
+        return;
+    }
+    Log(L"%s: launcher back in front", why);
+    ShowFront();
+}
+
+static LRESULT CALLBACK BackProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(hwnd, &ps);
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        FillRect(dc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_LBUTTONUP:   // a tap beside the program: it comes back on top
+        if (!RaiseProgram())
+            HideBackdrop();
+        return 0;
+    }
+    return DefWindowProc(hwnd, msg, wp, lp);
+}
+
+// ---- the reverse gear: desay_sdk_api.dll (the unit's ROM, \Windows) SV_VehicleGetReverseStatus(DWORD*) reads
+// GPIO 0x5d; no notifications ("not support"), so it is polled twice a second. The value at start is taken as
+// "not in reverse" (the polarity is not known). While in reverse nothing of ours is raised (the camera is up);
+// a second after it ends, the navigation comes back in front - the shell leaves its empty navigation screen
+// behind after the camera.
+enum { TIMER_REVERSE = 5, kReverseMs = 500, kReverseBackMs = 1000 };
+typedef DWORD (*ReverseFn)(DWORD*);
+static ReverseFn s_reverseFn;
+static int   s_reverseBase = -1;  // GPIO value at start = not in reverse
+static DWORD s_reverseOffTick;
+static bool  s_reverseErrLogged;
+
+static void InitReverse()
+{
+#ifdef UNDER_CE
+    HMODULE lib = LoadLibrary(L"desay_sdk_api.dll");
+    if (lib)
+        s_reverseFn = (ReverseFn)GetProcAddress(lib, L"SV_VehicleGetReverseStatus");
+#endif
+    Log(L"reverse: %s", s_reverseFn ? L"SV_VehicleGetReverseStatus polled" : L"not available");
+}
+
+static void PollReverse()
+{
+    if (!s_reverseFn)
+        return;
+    DWORD v = 0;
+    if (s_reverseFn(&v) != 0) {
+        if (!s_reverseErrLogged)
+            Log(L"reverse: SV_VehicleGetReverseStatus failed");
+        s_reverseErrLogged = true;
+        return;
+    }
+    if (s_reverseBase < 0) {
+        s_reverseBase = (int)v;
+        Log(L"reverse: GPIO 0x5d = %u at start, taken as \"not in reverse\"", (unsigned)v);
+        return;
+    }
+    bool rev = v != (DWORD)s_reverseBase;
+    if (rev != s_reverse) {
+        s_reverse = rev;
+        Log(L"reverse: %s (GPIO 0x5d = %u)", rev ? L"ON - nothing is raised" : L"off", (unsigned)v);
+        if (rev) {
+            HideBackdrop();   // never over the camera
+            s_reverseOffTick = 0;
+        } else {
+            s_reverseOffTick = GetTickCount();
+        }
+    }
+    if (!rev && s_reverseOffTick && GetTickCount() - s_reverseOffTick >= kReverseBackMs) {
+        s_reverseOffTick = 0;
+        if (s_navOn && GetForegroundWindow() != s_wnd)
+            BringBack(L"reverse ended");
+    }
+}
+
+static void CheckShellNavScreen()
+{
+    if (!s_navOn || s_reverse) {   // in reverse the shell shows the camera: hands off
+        s_shellNavHits = 0;
+        return;
+    }
+    HWND front = GetForegroundWindow();
+    DWORD pid = 0;
+    if (front)
+        GetWindowThreadProcessId(front, &pid);
+    wchar_t title[32] = L"";
+    if (front)
+        GetWindowText(front, title, 32);
+    if (!front || front == s_wnd || (s_guard && pid == s_guardPid) ||
+        (wcscmp(title, L"RadioCommWindow") && front != s_under)) {
+        s_shellNavHits = 0;   // we, the program, or anything but the shell in front
+        return;
+    }
+    static const POINT pts[8] = { { 100, 140 }, { 400, 140 }, { 700, 140 }, { 100, 260 },
+                                  { 400, 260 }, { 700, 260 }, { 250, 360 }, { 550, 360 } };
+    COLORREF c[8];
+    int marks = 0;
+    HDC dc = GetDC(NULL);
+    for (int i = 0; i < 8; i++) {
+        c[i] = GetPixel(dc, pts[i].x, pts[i].y);
+        if (c[i] == RGB(1, 1, 0))
+            marks++;
+    }
+    ReleaseDC(NULL, dc);
+    // the colours go to the log when it matches, and now and then otherwise (to check the mark on the unit)
+    if (marks >= 6 || GetTickCount() - s_shellNavLogTick > 15000) {
+        s_shellNavLogTick = GetTickCount();
+        Log(L"shell in front (%s): %d/8 nav-screen colour; %06X %06X %06X %06X %06X %06X %06X %06X",
+            ClassOf(front), marks, c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]);
+    }
+    if (marks < 6) {
+        s_shellNavHits = 0;
+        return;
+    }
+    if (++s_shellNavHits < 2)
+        return;
+    s_shellNavHits = 0;
+    BringBack(L"shell's black navigation screen");
 }
 
 // Day or night as in VestaHome (asked on every clock tick; without VestaHome it stays day).
@@ -1867,8 +2412,25 @@ static void DoAction(const Btn& b)
 {
     if (b.action != A_DELETE)
         s_delArmed = false;
+    if (b.action != A_TASKKILL)
+        s_taskArm = 0;
+    s_clipMenu = false;
     switch (b.action) {
     case A_BACK:     Minimize(); break;
+    case A_TASKS:      TasksOpen(); s_screen = S_TASKS; s_status[0] = 0; break;
+    case A_TASKBACK:   s_screen = S_APPS; s_status[0] = 0; break;
+    case A_TASKTAB:    s_taskTab = b.arg; s_taskPage = 0; s_status[0] = 0; break;
+    case A_TASKSORT:   TaskSort(&s_task, b.arg); s_taskPage = 0; break;
+    case A_TASKPAGE:
+        s_taskPage += b.arg;
+        s_taskPage = s_taskPage < 0 ? 0 : s_taskPage >= TaskPages() ? TaskPages() - 1 : s_taskPage;
+        break;
+    case A_TASKKILL:   TaskEnd((DWORD)b.arg); break;
+    case A_TASKSWITCH: TaskSwitch((HWND)(INT_PTR)b.arg); break;
+    case A_TASKCLOSE:  TaskClose((HWND)(INT_PTR)b.arg); break;
+    case A_CLIPCOPY:   ClipCopy(); break;
+    case A_CLIPPASTE:  ClipPaste(); break;
+    case A_CLIPCLEAR:  s_keysText[0] = 0; break;
     case A_RUN:      if (s_editMode) OpenEditor(b.arg); else RunApp(b.arg); break;
     case A_ADD:      OpenEditor(-1); break;
     case A_PREV:
@@ -2211,12 +2773,25 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         LoadApps();
         SyncNight();
         SetTimer(hwnd, TIMER_CLOCK, 1000, NULL);
+        InitReverse();
+        SetTimer(hwnd, TIMER_REVERSE, kReverseMs, NULL);
         NavStarted();
         CloseHandle(CreateThread(NULL, 0, ExitNaviThread, NULL, 0, NULL));
         Log(L"start, opened over %s; Nav_Started set", ClassOf(s_under));
         return 0;
     case WM_TIMER:
-        if (wp == TIMER_GUARD) {
+        if (wp == TIMER_LONG) {   // held on the keyboard's text field: copy / paste
+            KillTimer(hwnd, TIMER_LONG);
+            if (s_pressed >= 0 && s_btns[s_pressed].action == A_KEYFIELD) {
+                s_pressed = -1;   // the release does nothing
+                s_clipMenu = true;
+                Redraw();
+            }
+            return 0;
+        }
+        if (wp == TIMER_REVERSE) {
+            PollReverse();
+        } else if (wp == TIMER_GUARD) {
             OnGuardTimer();
         } else if (wp == TIMER_FRONT) {
             OnFrontTimer();
@@ -2225,14 +2800,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (IsWindowVisible(hwnd))
                 Redraw();   // the status line may have changed
         } else if (IsWindowVisible(hwnd) && GetForegroundWindow() == hwnd) {
-            // a whole frame costs: redraw only for a new minute or a day/night change
+            // a whole frame costs: redraw only for a new minute or a day/night change, or the task manager's
+            // new sample (every 2 s)
             bool night = s_night;
             SYSTEMTIME t;
             GetLocalTime(&t);
             SyncNight();
-            if (night != s_night || t.wMinute != s_drawnMinute)
+            bool tasks = wp == TIMER_CLOCK && s_screen == S_TASKS && (++s_taskTicks & 1) == 0;
+            if (tasks)
+                TaskSample(&s_task, hwnd);
+            if (night != s_night || t.wMinute != s_drawnMinute || tasks)
                 Redraw();
         }
+        if (wp == TIMER_CLOCK)
+            CheckShellNavScreen();   // every second, shown or hidden
         return 0;
     case WM_SHOWWINDOW:   // shown again: VestaHome's day/night may have changed meanwhile, the guard stops
         if (wp) {
@@ -2264,10 +2845,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_LBUTTONDOWN:
         s_downX = (short)LOWORD(lp);
         s_pressed = HitTest((short)LOWORD(lp), (short)HIWORD(lp));
+        if (s_pressed >= 0 && s_btns[s_pressed].action == A_KEYFIELD)
+            SetTimer(hwnd, TIMER_LONG, kLongMs, NULL);
         SetCapture(hwnd);
         Redraw();
         return 0;
     case WM_LBUTTONUP: {
+        KillTimer(hwnd, TIMER_LONG);
         ReleaseCapture();
         int x = (short)LOWORD(lp), dx = x - s_downX;
         int i = HitTest(x, (short)HIWORD(lp));
@@ -2322,6 +2906,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_DESTROY:
         NavTerminated();   // the shell may start us again
         KillTimer(hwnd, TIMER_CLOCK);
+        KillTimer(hwnd, TIMER_REVERSE);
+        if (s_backWnd)
+            DestroyWindow(s_backWnd);
 #ifdef UNDER_CE
         if (s_taskbar)
             ShowWindow(s_taskbar, SW_SHOW);
@@ -2396,6 +2983,23 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmd, int)
     HWND hwnd = CreateWindowEx(exStyle, APP_CLASS, L"VestaLaunch", style, x, y, w, h, NULL, NULL, inst, NULL);
     if (!hwnd)
         return 1;
+    {   // the backdrop under programs (hidden until one is in front)
+        WNDCLASS bc;
+        memset(&bc, 0, sizeof(bc));
+        bc.lpfnWndProc = BackProc;
+        bc.hInstance = inst;
+        bc.lpszClassName = L"VestaLaunchBackdrop";
+        RegisterClass(&bc);
+#ifdef UNDER_CE
+        s_backWnd = CreateWindowEx(WS_EX_TOPMOST, L"VestaLaunchBackdrop", L"", WS_POPUP, 0, 0, 800, 480, NULL, NULL,
+                                   inst, NULL);
+#else
+        RECT wr;   // PC: over the launcher's own window only
+        GetWindowRect(hwnd, &wr);
+        s_backWnd = CreateWindowEx(0, L"VestaLaunchBackdrop", L"", WS_POPUP, wr.left, wr.top, wr.right - wr.left,
+                                   wr.bottom - wr.top, NULL, NULL, inst, NULL);
+#endif
+    }
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
     SetForegroundWindow(hwnd);
