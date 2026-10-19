@@ -111,10 +111,11 @@ static Running s_running[kMaxRunning];
 
 // The guard: while a raised program is in front, every window of its process is kept topmost. A dialog it
 // opens is a normal window and would land under VestaHome (topmost), and the program with it.
-// A program that hangs or crashes can lose its windows while its process stays: the unit is then left on the
-// shell's black navigation screen. After kBlackMs without a visible window of the process we step aside to
-// the shell as on "Back".
-enum { TIMER_GUARD = 3, kGuardMs = 500, kBlackMs = 10000 };
+// A program can be left without a visible window while its process stays: its own "minimize" (CE has no
+// minimized state - the window is hidden; CityGuide, 2026-10-19) or a hang / crash. Our black backdrop and the
+// shell's black navigation screen then stay. After kBlackMs without a visible window of the process we step
+// aside to the shell as on "Back" (the program keeps running).
+enum { TIMER_GUARD = 3, kGuardMs = 500, kBlackMs = 2000 };
 static HANDLE s_guard;        // process of the program in front; NULL = no guard
 static DWORD  s_guardPid;
 static DWORD  s_guardSeen;    // GetTickCount() when a visible window of the process was last seen
@@ -1433,7 +1434,8 @@ static void OnGuardTimer()
     if (shown) {
         s_guardSeen = GetTickCount();
     } else if (GetTickCount() - s_guardSeen > kBlackMs) {
-        Log(L"program (pid %u) without a window for %u s: back to the shell", (unsigned)s_guardPid, kBlackMs / 1000);
+        Log(L"program (pid %u) without a window for %u ms (minimized?): back to the shell", (unsigned)s_guardPid,
+            (unsigned)kBlackMs);
         Minimize();
         return;
     }
@@ -1452,6 +1454,23 @@ static void OnGuardTimer()
     }
 }
 
+// VestaHome keeps itself in front and its "Minimize" sends it under explorer: it gets neither the backdrop nor
+// the guard (with them the black backdrop stayed over explorer, 2026-10-16). The launcher just hides.
+static bool IsHome(HWND h)
+{
+    wchar_t cls[32] = L"";
+    GetClassName(h, cls, 32);
+    return !wcscmp(cls, HOME_CLASS);
+}
+
+static void FrontHome(HWND h)
+{
+    StopGuard();
+    HideBackdrop();
+    SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    SetForegroundWindow(h);
+}
+
 static void OnWaitTimer()
 {
     if (s_waitApp < 0) {
@@ -1460,7 +1479,14 @@ static void OnWaitTimer()
     }
     FindApp f = { NULL };
     EnumWindows(EnumApp, (LPARAM)&f);
-    if (f.found) {
+    if (f.found && IsHome(f.found)) {
+        KillTimer(s_wnd, TIMER_WAIT);
+        FrontHome(f.found);
+        Log(L"program in front: %s (VestaHome: no guard)", s_apps[s_waitApp].name);
+        s_status[0] = 0;
+        s_waitApp = -1;
+        ShowWindow(s_wnd, SW_HIDE);
+    } else if (f.found) {
         KillTimer(s_wnd, TIMER_WAIT);
         SetWindowPos(f.found, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
         PutBackdropUnder(f.found);   // a tap beside a smaller window must not reach the shell
@@ -1563,8 +1589,14 @@ static void TaskSwitch(HWND h)
         Minimize();
         return;
     }
-    // as a program started from here: on top with the backdrop under it, guarded, the launcher hides
     s_status[0] = 0;
+    if (IsHome(h)) {
+        FrontHome(h);
+        Log(L"task manager: switched to %s (VestaHome: no guard)", s_task.win[i].title);
+        ShowWindow(s_wnd, SW_HIDE);
+        return;
+    }
+    // as a program started from here: on top with the backdrop under it, guarded, the launcher hides
     SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
     PutBackdropUnder(h);
     SetForegroundWindow(h);
@@ -2286,9 +2318,11 @@ static LRESULT CALLBACK BackProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         EndPaint(hwnd, &ps);
         return 0;
     }
-    case WM_LBUTTONUP:   // a tap beside the program: it comes back on top
-        if (!RaiseProgram())
-            HideBackdrop();
+    case WM_LBUTTONUP:   // a tap beside the program: it comes back on top; none to raise - back to the shell
+        if (!RaiseProgram()) {
+            Log(L"backdrop tapped, no program window: back to the shell");
+            Minimize();
+        }
         return 0;
     }
     return DefWindowProc(hwnd, msg, wp, lp);
