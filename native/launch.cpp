@@ -1434,9 +1434,14 @@ static void OnGuardTimer()
     if (shown) {
         s_guardSeen = GetTickCount();
     } else if (GetTickCount() - s_guardSeen > kBlackMs) {
-        Log(L"program (pid %u) without a window for %u ms (minimized?): back to the shell", (unsigned)s_guardPid,
+        // As when it closes: the launcher (straight back to the shell left its black navigation screen up, and
+        // a tap there brought CityGuide back - HU 2026-10-20); "Back" from the launcher returns to the shell.
+        Log(L"program (pid %u) without a window for %u ms (minimized?): back to the launcher", (unsigned)s_guardPid,
             (unsigned)kBlackMs);
-        Minimize();
+        StopGuard();
+        DropRaised();
+        HideBackdrop();
+        ShowFront();
         return;
     }
     HWND front = GetForegroundWindow();
