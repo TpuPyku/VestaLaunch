@@ -25,6 +25,8 @@
 #define STBI_ASSERT(x) ((void)0)
 #include "stb_image.h"
 #include "vtask.h"   // VestaCore: the task manager's processes, windows and load
+#include "vversion.h"   // VestaCore: the version "major.minor.YYMMDD" (the date: this file's build)
+static const wchar_t* const kRelease = L"1.04";   // raise by hand: minor - significant changes, major - big releases
 
 #define APP_CLASS L"VestaLaunch_Wnd"
 
@@ -705,7 +707,7 @@ static void Dock(HDC dc)
 }
 
 // Button states as in VestaHome: outlined, selected, pressed, filled, the screen's main action (orange).
-enum { B_N, B_SEL, B_ACT, B_FILL, B_PRI };
+enum { B_N, B_SEL, B_ACT, B_FILL, B_PRI, B_DIS };   // B_DIS: shown, not to be pressed
 
 static void Button(HDC dc, int x, int y, int w, int h, const wchar_t* label, int state, Icon ic = IC_NONE,
                    int size = 18, int isz = 0, Action a = A_NONE, int arg = 0)
@@ -719,6 +721,9 @@ static void Button(HDC dc, int x, int y, int w, int h, const wchar_t* label, int
     } else if (state == B_FILL) {
         R(dc, x, y, w, h, 10, kPanel, kLine);
         fg = kText;
+    } else if (state == B_DIS) {
+        R(dc, x, y, w, h, 10, CLR_INVALID, kPanel);
+        fg = kDim;
     } else {
         R(dc, x, y, w, h, 10, CLR_INVALID, kLine);
         fg = label ? kMuted : kText;
@@ -823,6 +828,9 @@ static void DrawApps(HDC dc)
     }
     Button(dc, 16, 410, 184, 58, L"ЗАДАЧИ", B_N, IC_TASKS, 17, 0, A_TASKS);
     Button(dc, 600, 410, 184, 58, L"ИЗМЕНИТЬ", s_editMode ? B_SEL : B_N, IC_EDIT, 17, 0, A_EDITMODE);
+    wchar_t ver[40];   // the version, small, under the page dots (VestaCore vversion.h)
+    _snwprintf(ver, 40, L"VestaLaunch %s", AppVersion(kRelease));
+    T(dc, 400, 464, ver, 11, kDim, 400, AL_MID);
 }
 
 static const wchar_t* kFieldCaption[4] = { L"НАЗВАНИЕ", L"ПРОГРАММА", L"ПАРАМЕТРЫ ЗАПУСКА", L"ИКОНКА" };
@@ -1721,8 +1729,10 @@ static void DrawTasks(HDC dc)
             else
                 wcscpy(s, L"-");
             T(dc, 604, y + 29, s, 17, kText, 700, AL_END);
-            if (sys || self)
-                T(dc, 700, y + 28, sys ? L"система" : L"эта программа", 14, kDim, 600, AL_MID);
+            if (sys)   // ending it would hang or reset the unit (TaskIsSystem): the button there, off
+                Button(dc, 624, y + 4, 152, 36, L"СИСТЕМНЫЙ", B_DIS, IC_NONE, 15, 0, A_NONE);
+            else if (self)
+                T(dc, 700, y + 28, L"эта программа", 14, kDim, 600, AL_MID);
             else
                 Button(dc, 624, y + 4, 152, 36, s_taskArm == p.pid ? L"ТОЧНО?" : L"ЗАВЕРШИТЬ",
                        s_taskArm == p.pid ? B_PRI : B_N, IC_NONE, 15, 0, A_TASKKILL, (int)p.pid);
