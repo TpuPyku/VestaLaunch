@@ -1,0 +1,4 @@
+Third-party parts of VestaLaunch and their licenses. The program itself: GNU GPL v3 (LICENSE).
+
+stb_image 2.30 (native: stb_image.h) - Sean Barrett, http://nothings.org/stb
+Public domain (the Unlicense, its alternative B); also MIT, Copyright (c) 2017 Sean Barrett.
