@@ -33,3 +33,7 @@
 
 # Logs (PC test runs write them next to the exe)
 *.log
+
+# build intermediates (build.bat / make_payload.py make them again)
+obj/
+payload.bin
