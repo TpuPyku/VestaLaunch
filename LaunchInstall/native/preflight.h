@@ -76,6 +76,19 @@ static const wchar_t* Looks(const wchar_t* name, const unsigned char* d, DWORD n
     return EntropyX100(d, n) >= 750 ? L"шум (шифр или сжатие)" : L"данные";
 }
 
+// CRC-32 (zlib's) of n more bytes after crc (0 to start): a whole file read in pieces (the probe's "целостность",
+// the user 17.11: files copied off \ResidentFlash of the CAN panel firmware came out broken on the PC).
+static unsigned long Crc32(unsigned long crc, const unsigned char* d, DWORD n)
+{
+    crc = ~crc & 0xFFFFFFFFUL;
+    for (DWORD i = 0; i < n; i++) {
+        crc ^= d[i];
+        for (int k = 0; k < 8; k++)
+            crc = crc & 1 ? (crc >> 1) ^ 0xEDB88320UL : crc >> 1;
+    }
+    return ~crc & 0xFFFFFFFFUL;
+}
+
 // The first bytes (at most 16) in hex for the log: "4D 5A 90 00"; "-" when none. cap: at least 2.
 static void HexHead(const unsigned char* d, DWORD n, wchar_t* out, int cap)
 {

@@ -121,6 +121,10 @@ int main()
         edge[128 + i] = (unsigned char)(64 + i);
     Check(EntropyX100(edge, 256) == 750, "the edge: 7.50 bits");
     Check(!wcscmp(Looks(L"x.bin", edge, 256), L"шум (шифр или сжатие)"), "7.50 bits: noise");
+    Check(Crc32(0, (const unsigned char*)"123456789", 9) == 0xCBF43926UL, "CRC32 of the check string");
+    Check(Crc32(Crc32(0, (const unsigned char*)"1234", 4), (const unsigned char*)"56789", 5) == 0xCBF43926UL,
+          "CRC32 in two pieces: the same");
+    Check(Crc32(0, NULL, 0) == 0, "CRC32 of nothing: 0");
     printf("test_preflight: %d checks, %d failed\n", s_checks, s_failed);
     return s_failed;
 }

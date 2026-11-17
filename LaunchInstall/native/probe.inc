@@ -363,6 +363,65 @@ static void ProbeFiles()
     }
 }
 
+// ---------------------------------------------------------------- whole files: as read, again, and their copy
+// The user 17.11: files copied off \ResidentFlash of the CAN panel firmware came out broken on the PC, while their
+// heads read here looked right. Each file read whole twice (CRC-32 both times), set against the factory 4120 file's
+// (MAIN/ResidentFlash), then copied to the card and the copy read back: which step breaks it shows.
+static bool FileCrc(const wchar_t* path, unsigned long* crc, DWORD* size)
+{
+    HANDLE f = CreateFile(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE)
+        return false;
+    static unsigned char buf[16384];
+    unsigned long c = 0;
+    DWORD got = 0, total = 0;
+    while (ReadFile(f, buf, sizeof(buf), &got, NULL) && got) {
+        c = Crc32(c, buf, got);
+        total += got;
+    }
+    CloseHandle(f);
+    *crc = c;
+    *size = total;
+    return true;
+}
+
+static void ProbeIntegrity()
+{
+    PLine(L"== целостность: файл целиком дважды, заводской 4120, копия на карту");
+    struct Known { const wchar_t* rel; unsigned long crc; } known[] = {
+        { L"\\ResidentFlash\\Main.exe", 0xA1AF41D9UL },
+        { L"\\ResidentFlash\\SwDnl.exe", 0x310FAAC2UL },
+        { L"\\ResidentFlash\\navigation\\app\\SPIPowerMgr.dll", 0x3F702529UL },
+        { L"\\ResidentFlash\\navigation\\app\\NCL_BaseCom.dll", 0x00D01466UL },
+        { L"\\ResidentFlash\\navigation\\app\\FLC_BLUETOOTH_SDK.dll", 0x9A04D581UL },
+        { L"\\ResidentFlash\\navigation\\app\\HzWD.exe", 0xC2AB9DD3UL },
+        { L"\\ResidentFlash\\navigation\\app\\G3NavHMI.exe", 0x8D514E55UL },   // (AppLauncher's one-byte patch: 0F9BA1C5)
+    };
+    const wchar_t* card = DirExists(L"\\SDMemory") ? L"\\SDMemory" : DirExists(L"\\USBDevice") ? L"\\USBDevice" : NULL;
+    for (int i = 0; i < (int)(sizeof(known) / sizeof(known[0])); i++) {
+        unsigned long a, b, c = 0;
+        DWORD sa, sb, sc = 0;
+        if (!FileCrc(known[i].rel, &a, &sa)) {
+            PLine(L"%s: не открывается, ошибка %lu", known[i].rel, GetLastError());
+            continue;
+        }
+        bool twice = FileCrc(known[i].rel, &b, &sb) && a == b && sa == sb;
+        wchar_t copy[64] = L"нет карты";
+        if (card) {
+            wchar_t dst[MAX_PATH];
+            Join(dst, card, L"LaunchInstall_copy.tmp");
+            if (CopyFile(known[i].rel, dst, FALSE) && FileCrc(dst, &c, &sc))
+                _snwprintf(copy, 64, L"%08lX%s", c, c == a && sc == sa ? L" = как читается" : L" ИНАЧЕ");
+            else
+                _snwprintf(copy, 64, L"не скопирован (%lu)", GetLastError());
+            copy[63] = 0;
+            DeleteFile(dst);
+        }
+        PLine(L"%s: %lu Б, CRC %08lX, второе чтение %s, заводской %08lX — %s; копия на карте: %s", known[i].rel, sa, a,
+              twice ? L"то же" : L"ДРУГОЕ", known[i].crc, a == known[i].crc ? L"совпадает" : L"другой", copy);
+    }
+}
+
 // ---------------------------------------------------------------- writing, and the system's loader
 static void ProbeWrites()
 {
@@ -449,6 +508,7 @@ static void DoProbe()
     ProbeVolumes();
     ProbeProcesses();
     ProbeFiles();
+    ProbeIntegrity();
     ProbeWrites();
     ProbeLoader();
     PLine(L"== конец, %d строк", s_probeLines);
