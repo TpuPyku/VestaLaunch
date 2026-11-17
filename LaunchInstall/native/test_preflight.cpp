@@ -125,6 +125,19 @@ int main()
     Check(Crc32(Crc32(0, (const unsigned char*)"1234", 4), (const unsigned char*)"56789", 5) == 0xCBF43926UL,
           "CRC32 in two pieces: the same");
     Check(Crc32(0, NULL, 0) == 0, "CRC32 of nothing: 0");
+    // an update and the user's own look (the user 17.11: keep Icons and the Skin edits)
+    Check(KeepWhich(false, false, 1, 0) == KEEP_OLD, "not in the new version (the user's own picture): kept");
+    Check(KeepWhich(true, true, 0x11, 0x11) == KEEP_NEW, "as the installer put it: the new version's");
+    Check(KeepWhich(true, true, 0x22, 0x11) == KEEP_OLD, "changed by the user: theirs kept");
+    Check(KeepWhich(true, false, 0x22, 0) == KEEP_ASIDE, "no list of what was put (older installs): the new one, "
+                                                         "theirs kept aside");
+    unsigned long crc = 0;
+    const char* list = "# shipped\r\nSkin\\skin.ini 0A0B0C0D\r\nskin\\add.png deadbeef\n";
+    Check(ShippedCrc(list, "Skin\\skin.ini", &crc) && crc == 0x0A0B0C0DUL, "the list: a file's CRC");
+    Check(ShippedCrc(list, "Skin\\ADD.png", &crc) && crc == 0xDEADBEEFUL, "the list: names in any case, the last line");
+    Check(!ShippedCrc(list, "Skin\\next.png", &crc), "the list: a file not in it");
+    Check(!ShippedCrc(list, "Skin", &crc), "the list: a name's start alone is not it");
+    Check(!ShippedCrc(NULL, "Skin\\skin.ini", &crc), "no list");
     printf("test_preflight: %d checks, %d failed\n", s_checks, s_failed);
     return s_failed;
 }

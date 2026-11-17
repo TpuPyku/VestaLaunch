@@ -517,9 +517,14 @@ static int GetPayload(Payload* pl)
     return GetRes(IDR_PAYLOAD, pl) && pl->size >= 8 && Crc32(pl->base, pl->size - 4) == ReadU32(pl->base + pl->size - 4);
 }
 
-// Writes every file under dir and reads it back; returns the number of files, -1 on any error.
+// Writes every file under dir and reads it back; returns the number of files, -1 on any error. The Skin's files are
+// listed with their CRC in dir\shipped.crc: the next update tells the user's edits from what was put (KeepWhich).
+static const wchar_t* kShipped = L"shipped.crc";
+
 static int Unpack(const Payload& pl, const wchar_t* dir)
 {
+    static char list[8192];
+    int ll = _snprintf(list, sizeof(list), "# VestaLaunch: Skin files as the installer put them (name CRC-32)\r\n");
     const unsigned char* p = pl.base + 4;
     const unsigned char* end = pl.base + pl.size - 4;
     unsigned long n = ReadU32(pl.base);
@@ -548,9 +553,101 @@ static int Unpack(const Payload& pl, const wchar_t* dir)
             Say(L"  ошибка записи: %s", path);
             return -1;
         }
+        if (!_strnicmp(name, "Skin/", 5) && ll < (int)sizeof(list) - 300) {
+            for (char* s = name; *s; s++)
+                if (*s == '/')
+                    *s = '\\';
+            ll += _snprintf(list + ll, sizeof(list) - ll, "%s %08lX\r\n", name, Crc32(0, p, (DWORD)dl));
+        }
         p += dl;
     }
+    wchar_t lp[MAX_PATH];
+    Join(lp, dir, kShipped);
+    if (!WriteBytes(lp, (const unsigned char*)list, (DWORD)ll))
+        return -1;
     return (int)n;
+}
+
+// A file's CRC-32, read whole; false - not readable.
+static bool FileCrc32(const wchar_t* path, unsigned long* crc)
+{
+    HANDLE f = CreateFile(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE)
+        return false;
+    static unsigned char buf[16384];
+    unsigned long c = 0;
+    DWORD got = 0;
+    while (ReadFile(f, buf, sizeof(buf), &got, NULL) && got)
+        c = Crc32(c, buf, got);
+    CloseHandle(f);
+    *crc = c;
+    return true;
+}
+
+// The update's step 1b (the user 17.11): the old install's Icons and Skin into the new one, file by file (KeepWhich);
+// the count of the user's files kept (in place or aside), -1 on a failed copy.
+static int KeepLook(const wchar_t* oldDir, const wchar_t* newDir)
+{
+    char* list = NULL;
+    wchar_t lp[MAX_PATH];
+    Join(lp, oldDir, kShipped);
+    HANDLE f = CreateFile(lp, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f != INVALID_HANDLE_VALUE) {
+        DWORD size = GetFileSize(f, NULL), got = 0;
+        list = size < 65536 ? (char*)malloc(size + 1) : NULL;
+        if (list && ReadFile(f, list, size, &got, NULL))
+            list[got] = 0;
+        else if (list)
+            list[0] = 0;
+        CloseHandle(f);
+    }
+    int kept = 0;
+    const wchar_t* subs[2] = { L"Icons", L"Skin" };
+    for (int s = 0; s < 2 && kept >= 0; s++) {
+        wchar_t mask[MAX_PATH], od[MAX_PATH], nd[MAX_PATH];
+        Join(od, oldDir, subs[s]);
+        Join(nd, newDir, subs[s]);
+        Join(mask, od, L"*");
+        WIN32_FIND_DATA fd;
+        HANDLE h = FindFirstFile(mask, &fd);
+        for (BOOL ok = h != INVALID_HANDLE_VALUE; ok && kept >= 0; ok = FindNextFile(h, &fd)) {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                continue;
+            wchar_t op[MAX_PATH], np[MAX_PATH], rel[MAX_PATH];
+            Join(op, od, fd.cFileName);
+            Join(np, nd, fd.cFileName);
+            _snwprintf(rel, MAX_PATH, L"%s\\%s", subs[s], fd.cFileName);
+            rel[MAX_PATH - 1] = 0;
+            char rel8[MAX_PATH];
+            WideCharToMultiByte(CP_UTF8, 0, rel, -1, rel8, MAX_PATH, NULL, NULL);
+            unsigned long oc = 0, sc = 0, nc = 0;
+            FileCrc32(op, &oc);
+            bool inNew = Exists(np) != 0;
+            if (inNew && FileCrc32(np, &nc) && nc == oc)
+                continue;   // (the same bytes: nothing to keep)
+            int k = KeepWhich(inNew, ShippedCrc(list, rel8, &sc), oc, sc);
+            if (k == KEEP_NEW)
+                continue;
+            wchar_t dst[MAX_PATH];
+            if (k == KEEP_ASIDE) {
+                wchar_t aside[MAX_PATH];
+                Join(aside, newDir, L"Skin.previous");
+                Join(dst, aside, rel);
+            } else {
+                wcscpy(dst, np);
+            }
+            if (!CopyChecked(op, dst)) {
+                Say(L"  ошибка: не скопирован %s", op);
+                kept = -1;
+            } else {
+                kept++;
+            }
+        }
+        if (h != INVALID_HANDLE_VALUE)
+            FindClose(h);
+    }
+    free(list);
+    return kept;
 }
 
 // ---------------------------------------------------------------- processes
@@ -991,7 +1088,16 @@ static int DoInstall()
         Say(L"ОШИБКА: не удалось перенести apps.txt, ничего не изменено.");
         return 0;
     }
+    int kept = Exists(g_launch) ? KeepLook(g_launch, g_new) : 0;
+    if (kept < 0) {
+        RemoveTree(g_new);
+        Say(L"ОШИБКА: не удалось перенести свои значки и оформление, ничего не изменено.");
+        return 0;
+    }
     Say(L"  1. VestaLaunch распакован и проверен: %d файлов%s", files, Exists(apps) ? L", apps.txt перенесён" : L"");
+    if (kept)
+        Say(L"     свои значки и оформление сохранены: %d файлов (изменённые в старом оформлении без списка — в Skin.previous)",
+            kept);
 
     // 2. G3NavHMI.exe: one byte
     if (patch) {

@@ -89,6 +89,36 @@ static unsigned long Crc32(unsigned long crc, const unsigned char* d, DWORD n)
     return ~crc & 0xFFFFFFFFUL;
 }
 
+// An update and the user's own look (the user 17.11: Icons and the Skin edits kept). The installer leaves a list of
+// what it put (shipped.crc: "Skin\name CRC" a line); a file of the old install's Icons / Skin goes:
+//   not in the new version - the old one (the user's own); as the list says - the new one; changed - the old one;
+//   no list (an install before it) - the new one, the old kept aside (Skin.previous): edits can't be told apart.
+enum { KEEP_NEW, KEEP_OLD, KEEP_ASIDE };
+static int KeepWhich(bool inNew, bool listed, unsigned long oldCrc, unsigned long shippedCrc)
+{
+    if (!inNew)
+        return KEEP_OLD;
+    if (!listed)
+        return KEEP_ASIDE;
+    return oldCrc == shippedCrc ? KEEP_NEW : KEEP_OLD;
+}
+
+// The CRC the list gives a file (its relative name, any case); false - not listed, or no list.
+static bool ShippedCrc(const char* list, const char* name, unsigned long* crc)
+{
+    size_t nl = strlen(name);
+    for (const char* p = list; p && *p;) {
+        const char* e = strpbrk(p, "\r\n");
+        size_t len = e ? (size_t)(e - p) : strlen(p);
+        if (len > nl + 1 && p[nl] == ' ' && !_strnicmp(p, name, nl)) {
+            *crc = strtoul(p + nl + 1, NULL, 16);
+            return true;
+        }
+        p = e ? e + 1 : NULL;
+    }
+    return false;
+}
+
 // The first bytes (at most 16) in hex for the log: "4D 5A 90 00"; "-" when none. cap: at least 2.
 static void HexHead(const unsigned char* d, DWORD n, wchar_t* out, int cap)
 {

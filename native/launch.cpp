@@ -2086,7 +2086,9 @@ static void DropRaised()
 
 // Where the log goes. On the unit only removable media - the SD card or a USB disk, folder VestaLogs - never
 // the built-in flash (\SDMMC, \ResidentFlash, \StorageFlash wear out); without a card or a disk there is no
-// log. Looked up again every 30 s: a card can be put in later. PC: next to the exe.
+// log. And only with the logs' switch on - the flag \SDMMC\VestaLogs.on (VestaHome's "Diagnostics -> Журналы"; the
+// user 2026-11-17: no flag, no log). Looked up again every 30 s: a card can be put in, the switch turned on later.
+// PC: next to the exe.
 static bool LogDir(wchar_t* dir)
 {
 #ifdef UNDER_CE
@@ -2098,7 +2100,8 @@ static bool LogDir(wchar_t* dir)
         s_logDirTried = true;
         s_logDirTick = GetTickCount();
         s_logDirOk = false;
-        for (int i = 0; i < 4 && !s_logDirOk; i++) {
+        bool on = GetFileAttributes(L"\\SDMMC\\VestaLogs.on") != 0xFFFFFFFF;
+        for (int i = 0; i < 4 && on && !s_logDirOk; i++) {
             DWORD a = GetFileAttributes(vols[i]);
             if (a == 0xFFFFFFFF || !(a & FILE_ATTRIBUTE_DIRECTORY))
                 continue;
