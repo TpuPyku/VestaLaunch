@@ -33,6 +33,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <tlhelp32.h>
+#include "preflight.h"
 
 #define APP_CLASS       L"LaunchInstall_Wnd"
 #define IDR_PAYLOAD     101
@@ -80,7 +81,13 @@ static int   g_hasLaunch;            // \SDMMC\VestaLaunch\VestaLaunch.exe exist
 static int   g_hasJournal;           // an interrupted run left its journal
 static int   g_bootFlag;             // \ResidentFlash\SwUpdate.flag is armed: a boot update is pending
 static int   g_payloadOk;
-static int   g_ui;                   // started with the window (asks before closing the shell)
+// what the files look like (preflight.h; the user 2026-11-17: a firmware that encrypts \ResidentFlash - refused
+// before anything is written, the reason in the log)
+static DWORD   g_exeSize, g_cfgSize;
+static int     g_exePe;              // G3NavHMI.exe has a program's header (MZ / PE)
+static int     g_cfgHas, g_cfgText;  // ExternNavi.cfg is there; it is text
+static wchar_t g_exeHead[64], g_cfgHead[64];   // their first bytes in hex, for the log
+static int   g_ui;                  // started with the window (asks before closing the shell)
 
 static wchar_t g_status[2048];       // what the last action did, one line per step
 static HWND    g_hwnd;
@@ -346,6 +353,40 @@ static char* ReadAll(const wchar_t* path, DWORD* size)
         *size = got;
     }
     return buf;
+}
+
+// The file's first bytes (at most cap) and its size; the bytes read, -1: it can't be opened.
+static int ReadHead(const wchar_t* path, unsigned char* buf, DWORD cap, DWORD* size)
+{
+    HANDLE h = CreateFile(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    *size = 0;
+    if (h == INVALID_HANDLE_VALUE)
+        return -1;
+    *size = GetFileSize(h, NULL);
+    DWORD got = 0;
+    if (!ReadFile(h, buf, cap, &got, NULL))
+        got = 0;
+    CloseHandle(h);
+    return (int)got;
+}
+
+// A trial in the shell's folder before anything is touched: a file of known bytes written, read back, deleted.
+// 0 ok; 1 not created (the partition is read-only); 2 read back other bytes (encrypted under us); 3 not deleted.
+static int ProbeWrite(const wchar_t* dir)
+{
+    wchar_t p[MAX_PATH];
+    Join(p, dir, L"LaunchInstall.probe");
+    unsigned char b[64];
+    for (int i = 0; i < 64; i++)
+        b[i] = (unsigned char)(i * 37 + 11);
+    if (!WriteBytes(p, b, sizeof(b))) {
+        DeleteFile(p);
+        return 1;
+    }
+    int same = SameAs(p, b, sizeof(b));
+    if (!DeleteFile(p))
+        return 3;
+    return same ? 0 : 2;
 }
 
 // Counts "127.0.0.1" / "127.0.0.2" in the exe (streamed), remembers where the first "127.0.0.1" is.
@@ -767,8 +808,16 @@ static void Detect()
         ScanExe(&nOld, &nNew, &g_loopOff);
         g_exeState = nOld == 1 && nNew == 0 ? EXE_CLEAN : nOld == 0 && nNew == 1 ? EXE_PATCHED : EXE_UNKNOWN;
     }
-    DWORD size;
+    unsigned char head[4096];
+    int got = ReadHead(g_exe, head, sizeof(head), &g_exeSize);
+    g_exePe = got > 0 && PeImage(head, (DWORD)got);
+    HexHead(got > 0 ? head : NULL, got > 0 ? (DWORD)got : 0, g_exeHead, 64);
+    DWORD size = 0;
     char* cfg = ReadAll(g_cfg, &size);
+    g_cfgHas = Exists(g_cfg);
+    g_cfgSize = cfg ? size : 0;
+    g_cfgText = cfg && CfgIsText(cfg, size);
+    HexHead((const unsigned char*)cfg, cfg ? size : 0, g_cfgHead, 64);
     g_cfgOurs = cfg && !strncmp(cfg, kCfgLine, strlen(kCfgLine)) && (cfg[strlen(kCfgLine)] == '\r' || cfg[strlen(kCfgLine)] == '\n');
     free(cfg);
     DetectQm();
@@ -781,6 +830,56 @@ static void Detect()
     g_bootFlag = a != 0xFFFFFFFF && !(a & FILE_ATTRIBUTE_DIRECTORY);
     Payload pl;
     g_payloadOk = GetPayload(&pl);
+}
+
+// One line into the log only (the details; the window keeps the short result).
+static void LogF(const wchar_t* fmt, ...)
+{
+    wchar_t line[400];
+    va_list a;
+    va_start(a, fmt);
+    _vsnwprintf(line, 400, fmt, a);
+    va_end(a);
+    line[399] = 0;
+    LogMsg(line);
+}
+
+// What Detect found, into the log: enough to tell an unknown or encrypted firmware from our fault.
+static void LogFindings()
+{
+    int nOld = 0, nNew = 0;
+    DWORD off = 0;
+    if (Exists(g_exe))
+        ScanExe(&nOld, &nNew, &off);
+    LogF(L"проверка: %s", g_appDir);
+    LogF(L"  G3NavHMI.exe: %u Б, заголовок программы (MZ/PE): %s, начало: %s; 127.0.0.1 ×%d, 127.0.0.2 ×%d",
+         g_exeSize, g_exePe ? L"да" : L"НЕТ", g_exeHead, nOld, nNew);
+    LogF(L"  ExternNavi.cfg: %s, %u Б, текст: %s, начало: %s", g_cfgHas ? L"есть" : L"нет", g_cfgSize,
+         !g_cfgHas ? L"-" : g_cfgText ? L"да" : L"НЕТ", g_cfgHead);
+    LogF(L"  language_cn.qm: состояние %d; значок кнопки: состояние %d; VestaLaunch: %s; журнал прерванной: %s; "
+         L"SwUpdate.flag: %s; встроенные файлы: %s", g_qmState, g_iconState, g_hasLaunch ? L"есть" : L"нет",
+         g_hasJournal ? L"есть" : L"нет", g_bootFlag ? L"ЕСТЬ" : L"нет", g_payloadOk ? L"целы" : L"ПОВРЕЖДЕНЫ");
+}
+
+// The reasons not to touch the firmware, checked before the shell is closed and before anything is written; the
+// first found is told (and logged with the details); NULL - none.
+static const wchar_t* Refusal()
+{
+    if (!g_payloadOk)
+        return L"встроенные файлы установщика повреждены (CRC)";
+    if (g_bootFlag)
+        return L"заряжено загрузочное обновление (\\ResidentFlash\\SwUpdate.flag)";
+    if (g_exeState == EXE_MISSING)
+        return L"нет G3NavHMI.exe";
+    if (!g_exePe)
+        return L"G3NavHMI.exe не читается как программа (нет заголовка MZ/PE) — раздел зашифрован или защищён";
+    if (g_exeState == EXE_UNKNOWN)
+        return L"в G3NavHMI.exe не найден ровно один адрес 127.0.0.1 — незнакомая прошивка";
+    if (g_cfgHas && !g_cfgText)
+        return L"ExternNavi.cfg не читается как текст — раздел зашифрован или файл чужой";
+    int probe = ProbeWrite(g_appDir);
+    LogF(L"  пробная запись в папку оболочки: %d (0 — ок, 1 — не создан, 2 — прочитано другое, 3 — не удалён)", probe);
+    return ProbeRefusal(probe);
 }
 
 // New ExternNavi.cfg: our line first, then the other lines byte for byte (ours removed from further down),
@@ -851,11 +950,11 @@ static int DoInstall()
         }
         Detect();
     }
-    if (!g_payloadOk) { Say(L"ОШИБКА: встроенные файлы повреждены (CRC)."); return 0; }
-    if (g_bootFlag)   { Say(L"Отказ: заряжено загрузочное обновление (\\ResidentFlash\\SwUpdate.flag)."); return 0; }
-    if (g_exeState == EXE_MISSING) { Say(L"ОШИБКА: нет %s", g_exe); return 0; }
-    if (g_exeState == EXE_UNKNOWN) {
-        Say(L"Отказ: в G3NavHMI.exe не найден ровно один адрес 127.0.0.1 — незнакомая прошивка, патч не делается.");
+    LogFindings();
+    const wchar_t* no = Refusal();
+    if (no) {
+        Say(L"Отказ: %s.", no);
+        Say(L"Ничего не изменено. Подробности — LaunchInstall.log рядом с установщиком.");
         return 0;
     }
     int patch = g_exeState == EXE_CLEAN;
@@ -1100,6 +1199,11 @@ static void DoStatus()
         exe[g_exeState], g_cfgOurs ? L"VestaLaunch первым" : L"без VestaLaunch",
         g_hasLaunch ? L"установлен" : L"нет", qm[g_qmState], icon[g_iconState],
         g_hasJournal ? L"; прерванная установка!" : L"", g_bootFlag ? L"; заряжено загрузочное обновление!" : L"");
+    LogFindings();
+    if (!g_exePe && g_exeState != EXE_MISSING)
+        Say(L"G3NavHMI.exe не читается как программа — установка будет отклонена (раздел зашифрован?).");
+    if (g_cfgHas && !g_cfgText)
+        Say(L"ExternNavi.cfg не текст — установка будет отклонена.");
 }
 
 // ---------------------------------------------------------------- UI
