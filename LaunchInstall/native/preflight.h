@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 
 // A Windows program's bytes: "MZ", then "PE\0\0" where its e_lfanew (the little-endian u32 at 0x3C) points. An
 // encrypted file has neither.
@@ -40,6 +41,39 @@ static const wchar_t* ProbeRefusal(int probe)
     case 2:  return L"записанный в папку оболочки файл читается иначе — раздел шифрует файлы";
     default: return L"пробный файл в папке оболочки не удаляется — раздел защищён";
     }
+}
+
+// Shannon entropy of the bytes, bits per byte x 100 (0 .. 800): an encrypted or compressed file is near 800, a program's
+// header and text far below (the probe, 2026-11-17).
+static int EntropyX100(const unsigned char* d, DWORD n)
+{
+    DWORD count[256];
+    memset(count, 0, sizeof(count));
+    for (DWORD i = 0; i < n; i++)
+        count[d[i]]++;
+    double h = 0;
+    for (int v = 0; v < 256; v++)
+        if (count[v]) {
+            double p = (double)count[v] / n;
+            h -= p * log(p) / log(2.0);
+        }
+    return (int)(h * 100 + 0.5);
+}
+
+// How a file's first bytes look to us (the probe): a program, a program we can't read (an .exe / .dll / .mui
+// without its header - encrypted for us), text, noise (encrypted or compressed: PNG, ZIP look so too), plain data.
+static const wchar_t* Looks(const wchar_t* name, const unsigned char* d, DWORD n)
+{
+    if (!d || !n)
+        return L"пустой";
+    if (PeImage(d, n))
+        return L"программа";
+    const wchar_t* dot = wcsrchr(name, L'.');
+    if (dot && (!_wcsicmp(dot, L".exe") || !_wcsicmp(dot, L".dll") || !_wcsicmp(dot, L".mui")))
+        return L"ПРОГРАММА НЕ ЧИТАЕТСЯ";
+    if (CfgIsText((const char*)d, n))
+        return L"текст";
+    return EntropyX100(d, n) >= 750 ? L"шум (шифр или сжатие)" : L"данные";
 }
 
 // The first bytes (at most 16) in hex for the log: "4D 5A 90 00"; "-" when none. cap: at least 2.

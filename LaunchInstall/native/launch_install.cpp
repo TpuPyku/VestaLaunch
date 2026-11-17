@@ -1206,6 +1206,8 @@ static void DoStatus()
         Say(L"ExternNavi.cfg не текст — установка будет отклонена.");
 }
 
+#include "probe.inc"
+
 // ---------------------------------------------------------------- UI
 
 #define C_INK    RGB(0x0b, 0x0c, 0x0e)
@@ -1217,11 +1219,12 @@ static void DoStatus()
 #define C_FACET  RGB(0xc2, 0x4a, 0x0b)
 
 struct Btn { RECT rc; const wchar_t* label; int id; };
-enum { B_INSTALL, B_UNINSTALL, B_EXIT };
-static const Btn g_btns[3] = {
-    { {  16, 410, 256, 468 }, L"УСТАНОВИТЬ", B_INSTALL },
-    { { 280, 410, 520, 468 }, L"УДАЛИТЬ",    B_UNINSTALL },
-    { { 544, 410, 784, 468 }, L"ВЫХОД",      B_EXIT },
+enum { B_INSTALL, B_UNINSTALL, B_PROBE, B_EXIT };
+static const Btn g_btns[4] = {   // (the probe, 2026-11-17: four in a row)
+    { {  16, 410, 199, 468 }, L"УСТАНОВИТЬ",  B_INSTALL },
+    { { 211, 410, 394, 468 }, L"УДАЛИТЬ",     B_UNINSTALL },
+    { { 406, 410, 589, 468 }, L"ДИАГНОСТИКА", B_PROBE },
+    { { 601, 410, 784, 468 }, L"ВЫХОД",       B_EXIT },
 };
 static HFONT g_font, g_fontS, g_fontB;
 static int   g_press = -1, g_busy;
@@ -1284,7 +1287,7 @@ static void Paint(HDC hdc)
     Text(dc, 30, 160, 770, 392, g_status[0] ? g_status : L"Ставит VestaLaunch на \\SDMMC, патчит G3NavHMI.exe и ExternNavi.cfg. "
          L"Каждый шаг проверяется; при ошибке или если оболочка не поднимется — всё возвращается как было.",
          C_TEXT, g_fontS, DT_LEFT | DT_WORDBREAK);
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
         const RECT& r = g_btns[i].rc;
         int orange = g_press == i || i == B_INSTALL;   // "Install" is the screen's one main action
         Fill(dc, r.left, r.top, r.right, r.bottom, g_press == i && i == B_INSTALL ? C_FACET : orange ? C_ORANGE : C_INK);
@@ -1305,7 +1308,7 @@ static void Paint(HDC hdc)
 
 static int HitTest(int x, int y)
 {
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
         const RECT& r = g_btns[i].rc;
         if (x >= r.left && x < r.right && y >= r.top && y < r.bottom)
             return i;
@@ -1351,6 +1354,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_busy = 1;   // one action at a time
         if (g_btns[i].id == B_INSTALL)
             DoInstall();
+        else if (g_btns[i].id == B_PROBE)
+            DoProbe();
         else
             DoUninstall();
         g_busy = 0;
@@ -1369,7 +1374,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 }
 
 // ---------------------------------------------------------------- entry
-// Args (for scripts and tests): ["<appdir>"] [status|install|uninstall]; without a verb: the window.
+// Args (for scripts and tests): ["<appdir>"] [status|install|uninstall|probe]; without a verb: the window.
 
 #ifdef UNDER_CE
 int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmd, int)
@@ -1402,12 +1407,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmd, int)
             verb = 2;
         else if (!_wcsicmp(tok, L"status"))
             verb = 3;
+        else if (!_wcsicmp(tok, L"probe"))
+            verb = 4;
         else if (tok[0])
             wcscpy(g_appDir, tok);
     }
     LogMsg(L"---- LaunchInstall");
     if (verb) {
-        int ok = verb == 1 ? DoInstall() : verb == 2 ? DoUninstall() : (DoStatus(), 1);
+        int ok = verb == 1 ? DoInstall() : verb == 2 ? DoUninstall() : verb == 4 ? (DoProbe(), 1) : (DoStatus(), 1);
         return ok ? 0 : 1;
     }
 

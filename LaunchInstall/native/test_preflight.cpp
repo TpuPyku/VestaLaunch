@@ -93,6 +93,34 @@ int main()
     Check(ProbeRefusal(1) && wcsstr(ProbeRefusal(1), L"нельзя записать"), "not created: the partition protected");
     Check(ProbeRefusal(2) && wcsstr(ProbeRefusal(2), L"шифрует"), "read back otherwise: it encrypts");
     Check(ProbeRefusal(3) && wcsstr(ProbeRefusal(3), L"не удаляется"), "not deleted: protected");
+    // the probe (a firmware that encrypts its partitions): how a file's first bytes look
+    unsigned char same[256], all[256];
+    memset(same, 'A', sizeof(same));
+    for (int i = 0; i < 256; i++)
+        all[i] = (unsigned char)i;
+    Check(EntropyX100(same, 256) == 0, "one byte value: entropy 0");
+    Check(EntropyX100(all, 256) == 800, "every byte value once: 8 bits");
+    Check(EntropyX100(all, 128) == 700, "128 values once: 7 bits");
+    Check(EntropyX100(NULL, 0) == 0, "nothing: 0");
+    Check(!wcscmp(Looks(L"a.dll", pe, 0x200), L"программа"), "a program read as one");
+    Check(!wcscmp(Looks(L"G3NavHMI.EXE", all, 256), L"ПРОГРАММА НЕ ЧИТАЕТСЯ"), "an exe without its header: told");
+    Check(!wcscmp(Looks(L"x.mui", all, 256), L"ПРОГРАММА НЕ ЧИТАЕТСЯ"), "a .mui (resources) too");
+    Check(!wcscmp(Looks(L"ExternNavi.cfg", (const unsigned char*)"\\SDMMC\\a.exe\r\n", 14), L"текст"), "a cfg: text");
+    Check(!wcscmp(Looks(L"x.bin", all, 256), L"шум (шифр или сжатие)"), "noise");
+    unsigned char low[256];
+    memset(low, 0x01, sizeof(low));
+    Check(!wcscmp(Looks(L"x.bin", low, 256), L"данные"), "plain data (not text, not noise)");
+    Check(!wcscmp(Looks(L"x.bin", all, 200), L"шум (шифр или сжатие)"), "200 values: 7.64 bits - noise");
+    Check(!wcscmp(Looks(L"x.bin", all + 1, 150), L"данные"), "150 values: 7.23 bits - data");
+    Check(!wcscmp(Looks(L"empty.txt", NULL, 0), L"пустой"), "an empty file");
+    Check(!wcscmp(Looks(L"empty.txt", all, 0), L"пустой"), "no bytes read: empty");
+    unsigned char edge[256];   // 0..63 twice, 64..191 once: exactly 7.50 bits (and not text: control bytes in it)
+    for (int i = 0; i < 128; i++)
+        edge[i] = (unsigned char)(i / 2);
+    for (int i = 0; i < 128; i++)
+        edge[128 + i] = (unsigned char)(64 + i);
+    Check(EntropyX100(edge, 256) == 750, "the edge: 7.50 bits");
+    Check(!wcscmp(Looks(L"x.bin", edge, 256), L"шум (шифр или сжатие)"), "7.50 bits: noise");
     printf("test_preflight: %d checks, %d failed\n", s_checks, s_failed);
     return s_failed;
 }
