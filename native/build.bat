@@ -18,7 +18,7 @@ set CORE=%~dp0..\..\VestaCore
 if not exist "%CORE%\vtask.cpp" set CORE=%~dp0..\core
 if not exist "%CORE%\vtask.cpp" goto nocore
 echo === VestaCore: %CORE%
-set SRC=%SRC% "%CORE%\vtask.cpp"
+set SRC=%SRC% "%CORE%\vtask.cpp" "%CORE%\vrvc.cpp"
 
 if not exist obj\arm mkdir obj\arm
 if not exist obj\pc  mkdir obj\pc
