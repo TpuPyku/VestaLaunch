@@ -24,7 +24,7 @@
 #define STBI_NO_THREAD_LOCALS
 #define STBI_ASSERT(x) ((void)0)
 #include "stb_image.h"
-#include "vrvc.h"    // VestaCore: the rear view camera
+#include "vrvc.h"    // VestaCore: the reverse gear (RvcReverse)
 #include "vtask.h"   // VestaCore: the task manager's processes, windows and load
 #include "vversion.h"   // VestaCore: the version "major.minor.YYMMDD" (the date: this file's build)
 static const wchar_t* const kRelease = L"1.04";   // raise by hand: minor - significant changes, major - big releases
@@ -123,7 +123,7 @@ static HANDLE s_guard;        // process of the program in front; NULL = no guar
 static DWORD  s_guardPid;
 static DWORD  s_guardSeen;    // GetTickCount() when a visible window of the process was last seen
 static HWND   s_backWnd;      // the black backdrop under a program (see PutBackdropUnder)
-static bool   s_reverse;      // the reverse gear is in (our camera window shows): nothing else of ours is raised
+static bool   s_reverse;      // the reverse gear is in (the shell's camera in front): nothing of ours is raised
 static void   PutBackdropUnder(HWND top);
 static void   HideBackdrop();
 enum { kMaxApps = 64, kAppsPerPage = 8 };
@@ -2344,66 +2344,61 @@ static LRESULT CALLBACK BackProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     return DefWindowProc(hwnd, msg, wp, lp);
 }
 
-// ---- the reverse gear and the rear view camera (VestaCore vrvc: the reverse from desay_sdk_api.dll, GPIO 0x5d, 0 in
-// reverse; no notifications, so polled 4 times a second). HU 2026-11-17: with a navigator in front the camera did
-// not come up - the navigators' windows are topmost (OSMapsCE's too) and the shell's camera stayed under them. So in
-// reverse our own topmost window shows the camera (its video under the colour key, the guide lines without the
-// wheel's angle), raised again on every poll - as VestaHome does. Nothing else of ours is raised meanwhile; a second
-// after it ends the navigation comes back in front (the shell leaves its empty navigation screen behind).
-#define CAM_CLASS L"VestaLaunch_Rvc"
+// ---- the reverse gear and the shell's camera (the reverse from VestaCore vrvc: desay_sdk_api.dll, GPIO 0x5d, 0 in
+// reverse; no notifications, so polled 4 times a second). The shell shows the camera itself, its guide lines with the
+// steering angle (as AppLauncher leaves it). HU 2026-11-17: with a navigator in front it did not come up - the
+// program's windows are topmost (we raise them so - PutBackdropUnder; OSMapsCE makes itself so too) and the shell's
+// camera stayed under them. So in reverse, on every poll: nothing of ours or of the program stays topmost, and the
+// shell's window comes to the front. A second after the reverse ends the navigation comes back in front (BringBack
+// raises the program again; the shell leaves its empty navigation screen behind).
 enum { TIMER_REVERSE = 5, kReverseMs = 250, kReverseBackMs = 1000 };
-static HWND  s_camWnd;
 static DWORD s_reverseOffTick;
 static bool  s_reverseErrLogged;
 
-static LRESULT CALLBACK CamProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+struct ShellWin { DWORD pid; HWND best; int area; int dropped; };
+
+static BOOL CALLBACK EnumYield(HWND h, LPARAM lp)   // the program's and our topmost windows down; the shell's biggest
 {
-    if (msg == WM_ERASEBKGND)
-        return 1;
-    if (msg == WM_PAINT) {
-        PAINTSTRUCT ps;
-        HDC dc = BeginPaint(hwnd, &ps);
-        RECT r = { 0, 0, 800, 480 };
-        HBRUSH key = CreateSolidBrush(RvcKey());   // (the video shows where the screen has this colour)
-        FillRect(dc, &r, key);
-        DeleteObject(key);
-        RvcDrawLines(dc, 0, false);   // (no steering angle here: the static lines)
-        EndPaint(hwnd, &ps);
-        return 0;
+    ShellWin* w = (ShellWin*)lp;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(h, &pid);
+    if (!IsWindowVisible(h))
+        return TRUE;
+    if ((h == s_wnd || (s_guardPid && pid == s_guardPid)) && (GetWindowLong(h, GWL_EXSTYLE) & WS_EX_TOPMOST)) {
+        SetWindowPos(h, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        w->dropped++;
     }
-    return DefWindowProc(hwnd, msg, wp, lp);
+    if (w->pid && pid == w->pid) {
+        RECT rc;
+        GetWindowRect(h, &rc);
+        int area = (rc.right - rc.left) * (rc.bottom - rc.top);
+        if (area > w->area) {
+            w->area = area;
+            w->best = h;
+        }
+    }
+    return TRUE;
 }
 
-static void CamShow()
+// In reverse: the shell's camera in front of everything of ours
+static void YieldToCamera(bool first)
 {
-    static bool s_registered;
-    if (!s_registered) {
-        WNDCLASS wc;
-        memset(&wc, 0, sizeof(wc));
-        wc.lpfnWndProc = CamProc;
-        wc.hInstance = GetModuleHandle(NULL);
-        wc.lpszClassName = CAM_CLASS;
-        s_registered = RegisterClass(&wc) != 0;
-    }
-    s_camWnd = CreateWindowEx(WS_EX_TOPMOST, CAM_CLASS, L"VestaLaunch camera", WS_POPUP | WS_VISIBLE, 0, 0, 800, 480,
-                              NULL, NULL, GetModuleHandle(NULL), NULL);
-    int signal = RvcVideo(true);
-    Log(L"camera: ours %s, signal %d", s_camWnd ? L"shown" : L"NOT created", signal);
-}
-
-static void CamHide()
-{
-    if (!s_camWnd)
-        return;
-    RvcVideo(false);
-    DestroyWindow(s_camWnd);
-    s_camWnd = NULL;
-    Log(L"camera: closed");
+    DropRaised();
+    HWND comm = FindWindow(NULL, L"RadioCommWindow");   // (the shell's own window: its process)
+    ShellWin w = { 0, NULL, 0, 0 };
+    if (comm)
+        GetWindowThreadProcessId(comm, &w.pid);
+    EnumWindows(EnumYield, (LPARAM)&w);
+    if (w.best && GetForegroundWindow() != w.best)
+        SetForegroundWindow(w.best);
+    if (first || w.dropped)
+        Log(L"camera: the shell's (pid %u) to the front, %d topmost windows put down%s", (unsigned)w.pid, w.dropped,
+            w.best ? L"" : L" - no shell window found");
 }
 
 static void InitReverse()
 {
-    Log(L"reverse: %s", RvcInit(Log) ? L"polled, the camera ours (vrvc)" : L"not available");
+    Log(L"reverse: %s", RvcInit(Log) ? L"polled, the camera the shell's" : L"not available");
 }
 
 static void PollReverse()
@@ -2416,23 +2411,19 @@ static void PollReverse()
         return;
     }
     bool rev = r == 1;
+    bool began = rev && !s_reverse;
     if (rev != s_reverse) {
         s_reverse = rev;
-        Log(L"reverse: %s", rev ? L"ON - the camera, nothing else raised" : L"off");
+        Log(L"reverse: %s", rev ? L"ON - the shell's camera in front" : L"off");
         if (rev) {
             HideBackdrop();   // never over the camera
             s_reverseOffTick = 0;
-            CamShow();
         } else {
-            CamHide();
             s_reverseOffTick = GetTickCount();
         }
     }
-    if (s_camWnd) {   // over everything, the navigators' topmost windows too, every poll (VestaHome: HU 2026-10-31)
-        SetWindowPos(s_camWnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE);
-        if (GetForegroundWindow() != s_camWnd)
-            SetForegroundWindow(s_camWnd);
-    }
+    if (rev)
+        YieldToCamera(began);
     if (!rev && s_reverseOffTick && GetTickCount() - s_reverseOffTick >= kReverseBackMs) {
         s_reverseOffTick = 0;
         if (s_navOn && GetForegroundWindow() != s_wnd)
@@ -2997,7 +2988,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         NavTerminated();   // the shell may start us again
         KillTimer(hwnd, TIMER_CLOCK);
         KillTimer(hwnd, TIMER_REVERSE);
-        CamHide();
         if (s_backWnd)
             DestroyWindow(s_backWnd);
 #ifdef UNDER_CE
