@@ -20,6 +20,14 @@ static int PeImage(const unsigned char* d, DWORD n)
     return at <= n - 4 && !memcmp(d + at, "PE\0\0", 4);
 }
 
+// VestaHome's loader stands in G3NavHMI.exe (2026-11-25): it renames the shell G3NavHMI_orig.exe and is far smaller
+// (~0.1 MB, the shell ~4 MB). Then the shell's backup (our patch's) goes back to G3NavHMI_orig.exe, never over the
+// loader - else VestaHome no longer starts.
+static int ShellIsLoader(DWORD exeSize, bool origThere)
+{
+    return origThere && exeSize > 0 && exeSize < 1024 * 1024;
+}
+
 // ExternNavi.cfg as the shell reads it: lines of paths - no zero byte, no control byte but tab and line ends.
 static int CfgIsText(const char* d, DWORD n)
 {

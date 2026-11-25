@@ -138,6 +138,12 @@ int main()
     Check(!ShippedCrc(list, "Skin\\next.png", &crc), "the list: a file not in it");
     Check(!ShippedCrc(list, "Skin", &crc), "the list: a name's start alone is not it");
     Check(!ShippedCrc(NULL, "Skin\\skin.ini", &crc), "no list");
+    // VestaHome's loader in G3NavHMI.exe (the shell renamed G3NavHMI_orig.exe): our backup goes to the shell, never
+    // over the loader (2026-11-25: an uninstall left VestaHome unstarted)
+    Check(ShellIsLoader(112128, true), "a small G3NavHMI.exe with the shell beside it: the loader");
+    Check(!ShellIsLoader(4077056, true), "the shell's own size: the shell");
+    Check(!ShellIsLoader(112128, false), "no G3NavHMI_orig.exe: whatever it is, it is the shell's place");
+    Check(!ShellIsLoader(0, true), "no G3NavHMI.exe: not the loader");
     printf("test_preflight: %d checks, %d failed\n", s_checks, s_failed);
     return s_failed;
 }

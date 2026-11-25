@@ -27,7 +27,7 @@
 #include "vrvc.h"    // VestaCore: the reverse gear (RvcReverse)
 #include "vtask.h"   // VestaCore: the task manager's processes, windows and load
 #include "vversion.h"   // VestaCore: the version "major.minor.YYMMDD" (the date: this file's build)
-static const wchar_t* const kRelease = L"1.05";   // raise by hand: minor - significant changes, major - big releases
+static const wchar_t* const kRelease = L"1.06";   // raise by hand: minor - significant changes, major - big releases
 
 #define APP_CLASS L"VestaLaunch_Wnd"
 

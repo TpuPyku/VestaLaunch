@@ -795,6 +795,8 @@ static int Journaled(const char* text, const char* step)
 }
 
 // Undoes the journaled steps in reverse order and starts the original shell. Returns 1 if all is back.
+static const wchar_t* ShellBack();   // (below: not over VestaHome's loader)
+
 static int Rollback()
 {
     DWORD size;
@@ -855,7 +857,7 @@ static int Rollback()
         }
     }
     if (Journaled(j, "exe") && Exists(g_exeBak) && Diff(g_exeBak, g_exe, NULL) != 0) {
-        if (CloseShell() && CopyChecked(g_exeBak, g_exe)) {
+        if (CloseShell() && CopyChecked(g_exeBak, ShellBack())) {
             DeleteFile(g_exeBak);
             Say(L"  G3NavHMI.exe восстановлен из копии");
         } else {
@@ -1221,6 +1223,25 @@ static int DoInstall()
     return 1;
 }
 
+// Where the shell's backup goes back (2026-11-25): G3NavHMI.exe, or G3NavHMI_orig.exe when VestaHome's loader stands
+// in G3NavHMI.exe (preflight.h ShellIsLoader) - the loader left in place, else VestaHome no longer starts.
+static const wchar_t* ShellBack()
+{
+    static wchar_t orig[MAX_PATH];
+    Join(orig, g_appDir, L"G3NavHMI_orig.exe");
+    DWORD size = 0;
+    HANDLE h = CreateFile(g_exe, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (h != INVALID_HANDLE_VALUE) {
+        size = GetFileSize(h, NULL);
+        CloseHandle(h);
+    }
+    if (ShellIsLoader(size, Exists(orig))) {
+        Say(L"  G3NavHMI.exe — загрузчик VestaHome: штатная оболочка возвращается в G3NavHMI_orig.exe");
+        return orig;
+    }
+    return g_exe;
+}
+
 static int DoUninstall()
 {
     g_status[0] = 0;
@@ -1249,8 +1270,8 @@ static int DoUninstall()
         free(text);
         free(old);
     }
-    if (Exists(g_exeBak)) {   // we patched the exe: back to the factory one
-        if (CloseShell() && CopyChecked(g_exeBak, g_exe)) {
+    if (Exists(g_exeBak)) {   // we patched the exe: back to the factory one (not over VestaHome's loader)
+        if (CloseShell() && CopyChecked(g_exeBak, ShellBack())) {
             DeleteFile(g_exeBak);
             Say(L"  G3NavHMI.exe восстановлен из копии");
         } else {
